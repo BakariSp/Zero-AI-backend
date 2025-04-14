@@ -6,3 +6,8 @@ pandas
 python-dotenv
 opentelemetry-api
 openai
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+
