@@ -11,7 +11,7 @@ async def lifespan(app):
     init_db()
     yield
     # Shutdown code (runs when the app is shutting down)
-    pass
+    pass  # 可以添加资源清理代码，如关闭连接池等
 
 app = FastAPI(lifespan=lifespan)
 
