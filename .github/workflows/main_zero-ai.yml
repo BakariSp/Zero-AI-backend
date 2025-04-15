@@ -78,4 +78,5 @@ jobs:
         with:
           app-name: 'zero-ai'
           slot-name: 'Production'
+          package: release.zip
           
