@@ -4,6 +4,9 @@ from app.db import init_db
 from app.api import router as api_router
 from app.auth import get_user_from_request
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+load_dotenv()  # Add this near the top of the file
 
 @asynccontextmanager
 async def lifespan(app):

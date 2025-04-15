@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from app.db import SessionLocal
+from app.db import SessionLocal, get_mysql_connection, test_connection
 from app.utils import get_azure_openai_client
 import os
 from datetime import datetime
@@ -43,6 +43,24 @@ def read_current_user(request: Request):
 @router.get("/test-db-connection")
 async def test_db_connection():
     try:
+        # First try using the direct mysql.connector approach
+        connection_result = test_connection()
+        
+        if connection_result:
+            return {
+                "status": "success",
+                "code": 200,
+                "message": "Database connection successful",
+                "data": {
+                    "test_value": 1,
+                    "db_type": "MySQL",
+                    "connection_info": "Connected to Azure MySQL database",
+                    "connection_method": "Direct connection test successful"
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        
+        # If the direct test fails, try the SQLAlchemy approach
         db = SessionLocal()
         result = db.execute(text("SELECT 1 as test_value")).fetchone()
         db.close()
@@ -55,10 +73,12 @@ async def test_db_connection():
                 "data": {
                     "test_value": result[0],
                     "db_type": "MySQL",
-                    "connection_info": "Connected to Azure MySQL database"
+                    "connection_info": "Connected to Azure MySQL database",
+                    "connection_method": "SQLAlchemy connection successful"
                 },
                 "timestamp": datetime.now().isoformat()
             }
+        
         return {
             "status": "error",
             "code": 500,
@@ -66,10 +86,14 @@ async def test_db_connection():
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        
         return {
             "status": "error",
             "code": 500,
             "message": f"Database connection failed: {str(e)}",
+            "error_details": error_details,
             "timestamp": datetime.now().isoformat()
         }
 
