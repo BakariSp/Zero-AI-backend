@@ -72,6 +72,34 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_3A0C41F146B54830AEE9E6171D5DDFCB }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_79EF2DC70D4A4D2296792234BF797A2B }}
 
+      - name: Configure App Settings
+        uses: azure/appservice-settings@v1
+        with:
+          app-name: 'zero-ai'
+          app-settings-json: |
+            [
+              {
+                "name": "DB_PASSWORD",
+                "value": "${{ secrets.DB_PASSWORD }}",
+                "slotSetting": false
+              },
+              {
+                "name": "AZURE_OPENAI_API_KEY",
+                "value": "${{ secrets.AZURE_OPENAI_API_KEY }}",
+                "slotSetting": false
+              },
+              {
+                "name": "AZURE_OPENAI_ENDPOINT",
+                "value": "${{ vars.AZURE_OPENAI_ENDPOINT }}",
+                "slotSetting": false
+              },
+              {
+                "name": "AZURE_OPENAI_API_VERSION",
+                "value": "${{ vars.AZURE_OPENAI_API_VERSION }}",
+                "slotSetting": false
+              },
+            ]
+
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
