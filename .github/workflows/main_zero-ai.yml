@@ -144,13 +144,6 @@ jobs:
                 "slotSetting": false
               }
             ]
-
-      - name: Verify SSL Certificate
-        run: |
-          if [ ! -f DigiCertGlobalRootCA.crt.pem ]; then
-            echo "SSL certificate file missing"
-            exit 1
-          fi
           
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
@@ -159,14 +152,6 @@ jobs:
           app-name: 'zero-ai'
           slot-name: 'Production'
           package: release.zip
-          startup-command: 'gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app'
-
-      - name: Verify SSL Certificate
-        run: |
-          if [ ! -f DigiCertGlobalRootCA.crt.pem ]; then
-            echo "SSL certificate file missing"
-            exit 1
-          fi
           
       - name: Verify deployment
         run: |
