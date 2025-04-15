@@ -84,6 +84,26 @@ jobs:
                 "slotSetting": false
               },
               {
+                "name": "DB_HOST",
+                "value": "${{ secrets.DB_HOST }}",
+                "slotSetting": false
+              },
+              {
+                "name": "DB_PORT",
+                "value": "${{ secrets.DB_PORT }}",
+                "slotSetting": false
+              },
+              {
+                "name": "DB_USER",
+                "value": "${{ secrets.DB_USER }}",
+                "slotSetting": false
+              },
+              {
+                "name": "DB_NAME",
+                "value": "zero-ai-database",
+                "slotSetting": false
+              },
+              {
                 "name": "AZURE_OPENAI_API_KEY",
                 "value": "${{ secrets.AZURE_OPENAI_API_KEY }}",
                 "slotSetting": false
@@ -98,8 +118,40 @@ jobs:
                 "value": "${{ vars.AZURE_OPENAI_API_VERSION }}",
                 "slotSetting": false
               },
+              {
+                "name": "AZURE_OPENAI_DEPLOYMENT_NAME",
+                "value": "${{ vars.AZURE_OPENAI_DEPLOYMENT_NAME }}",
+                "slotSetting": false
+              },
+              {
+                "name": "HOST",
+                "value": "${{ vars.HOST }}",
+                "slotSetting": false
+              },
+              {
+                "name": "PORT",
+                "value": "${{ vars.PORT }}",
+                "slotSetting": false
+              },
+              {
+                "name": "DEBUG",
+                "value": "${{ vars.DEBUG }}",
+                "slotSetting": false
+              },
+              {
+                "name": "SSL_CA",
+                "value": "DigiCertGlobalRootCA.crt.pem",
+                "slotSetting": false
+              }
             ]
 
+      - name: Verify SSL Certificate
+        run: |
+          if [ ! -f DigiCertGlobalRootCA.crt.pem ]; then
+            echo "SSL certificate file missing"
+            exit 1
+          fi
+          
       - name: 'Deploy to Azure Web App'
         uses: azure/webapps-deploy@v3
         id: deploy-to-webapp
@@ -115,4 +167,15 @@ jobs:
             echo "SSL certificate file missing"
             exit 1
           fi
+          
+      - name: Verify deployment
+        run: |
+          echo "Waiting for deployment to complete..."
+          sleep 30
+          response=$(curl -s -o /dev/null -w "%{http_code}" https://zero-ai.azurewebsites.net/api/public-test)
+          if [ "$response" != "200" ]; then
+            echo "Deployment verification failed with status code: $response"
+            exit 1
+          fi
+          echo "Deployment verified successfully!"
           
