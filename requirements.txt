@@ -11,4 +11,8 @@ uvicorn
 sqlalchemy
 pymysql
 python-jose
+mysql-connector-python
+gunicorn
+pydantic
+requests
 
