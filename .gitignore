@@ -49,12 +49,3 @@ __pycache__/
 
 # Redis dump
 dump.rdb
-
-# VS Code/Cursor Extensions
-.vscode/
-.cursor/
-*.vsix
-*.dll
-*.resources.dll
-**/extensions/**/*.dll
-**/extensions/**/*.resources.dll
