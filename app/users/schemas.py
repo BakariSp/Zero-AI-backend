@@ -9,8 +9,12 @@ class UserBase(BaseModel):
     profile_picture: Optional[str] = None
     interests: Optional[List[str]] = None
 
-class UserCreate(UserBase):
-    password: Optional[str] = None
+class UserCreate(BaseModel):
+    email: EmailStr
+    username: str
+    password: str
+    full_name: Optional[str] = None
+    is_active: bool = True
 
 class UserUpdate(BaseModel):
     username: Optional[str] = None

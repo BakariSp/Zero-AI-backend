@@ -66,53 +66,6 @@ class UserResponse(UserBase):
     class Config:
         from_attributes = True
 
-# Routes for OAuth login
-@router.get("/oauth/{provider}")
-async def oauth_login(provider: str, request: Request):
-    print(f"OAuth login requested for provider: {provider}")
-    print(f"Available OAuth clients: {list(oauth._clients.keys())}")
-    
-    if provider not in oauth._clients:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported OAuth provider: {provider}"
-        )
-    
-    # Get the redirect URI for the callback
-    redirect_uri = request.url_for('oauth_callback', provider=provider)
-    print(f"Redirect URI: {redirect_uri}")
-    
-    # Redirect to the OAuth provider's login page
-    return await oauth.create_client(provider).authorize_redirect(request, redirect_uri)
-
-@router.get("/oauth/{provider}/callback")
-async def oauth_callback(provider: str, request: Request):
-    # Get or create the user from the OAuth provider
-    user = await get_oauth_user(provider, request)
-    
-    # Create JWT token with user data
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
-    # Convert datetime to string if present
-    user_data = {
-        "sub": user.email,
-        "user_id": user.id,
-        "username": user.username,
-        "full_name": user.full_name,
-        "profile_picture": user.profile_picture
-    }
-    
-    access_token = create_access_token(
-        data=user_data, 
-        expires_delta=access_token_expires
-    )
-    
-    # Redirect to frontend with token
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{frontend_url}/oauth/callback?token={access_token}"
-    
-    return RedirectResponse(url=redirect_url)
-
 # User profile routes
 @router.get("/users/me", response_model=UserResponse)
 def read_users_me(current_user: User = Depends(get_current_active_user)):

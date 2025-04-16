@@ -5,6 +5,8 @@ from typing import Dict, Any, List, Optional
 import logging
 
 from app.models import User
+from app.users.schemas import UserCreate
+from app.utils.security import pwd_context
 
 def get_user(db: Session, user_id: int) -> Optional[User]:
     return db.query(User).filter(User.id == user_id).first()
@@ -24,20 +26,31 @@ def get_user_by_oauth(db: Session, provider: str, oauth_id: str):
         User.oauth_id == oauth_id
     ).first()
 
-def create_user(db: Session, user_data: Dict[str, Any]) -> User:
-    try:
-        db_user = User(**user_data)
-        db.add(db_user)
-        db.commit()
-        db.refresh(db_user)
-        return db_user
-    except IntegrityError as e:
-        db.rollback()
-        logging.error(f"Error creating user: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email or username already exists"
-        )
+def create_user(db: Session, user: UserCreate, oauth_provider: str = None, oauth_id: str = None, profile_picture: str = None):
+    """
+    Create a new user in the database
+    """
+    # Hash the password if it's provided
+    hashed_password = pwd_context.hash(user.password) if user.password else None
+    
+    # Create a new User object
+    db_user = User(
+        email=user.email,
+        username=user.username,
+        hashed_password=hashed_password,
+        full_name=user.full_name,
+        is_active=True,
+        oauth_provider=oauth_provider,
+        oauth_id=oauth_id,
+        profile_picture=profile_picture
+    )
+    
+    # Add the user to the database
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    
+    return db_user
 
 def update_user(db: Session, user_id: int, user_data: Dict[str, Any]) -> User:
     db_user = get_user(db, user_id)

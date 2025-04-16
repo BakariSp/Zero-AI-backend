@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
+import asyncio
 
 from app.users.routes import router as users_router
 from app.learning_paths.routes import router as learning_paths_router
@@ -10,6 +11,7 @@ from app.achievements.routes import router as achievements_router
 from app.sections.routes import router as sections_router
 from app.learning_path_courses.routes import router as learning_path_courses_router
 from app.recommendation.routes import router as recommendation_router
+from app.auth.oauth import router as oauth_router
 
 app = FastAPI(
     title="AI Learning Guide API",
@@ -42,10 +44,18 @@ app.include_router(achievements_router, prefix="/api", tags=["achievements"])
 app.include_router(sections_router, prefix="/api", tags=["sections"])
 app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_path_courses"])
 app.include_router(recommendation_router, prefix="/api", tags=["recommendations"])
+app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
+
 @app.get("/")
 def read_root():
     return {
         "message": "Welcome to the AI Learning Guide API",
         "docs": "/docs",
         "redoc": "/redoc"
-    } 
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    # Initialize background tasks
+    from app.services.cache import periodic_cache_cleanup
+    asyncio.create_task(periodic_cache_cleanup()) 
