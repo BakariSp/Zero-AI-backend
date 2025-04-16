@@ -39,3 +39,22 @@ logs/
 # OS specific
 .DS_Store
 Thumbs.db
+
+# Cache files
+.cache/
+*.cache
+cache/
+__pycache__/
+*.pyc
+
+# Redis dump
+dump.rdb
+
+# VS Code/Cursor Extensions
+.vscode/
+.cursor/
+*.vsix
+*.dll
+*.resources.dll
+**/extensions/**/*.dll
+**/extensions/**/*.resources.dll

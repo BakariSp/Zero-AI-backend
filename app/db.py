@@ -35,13 +35,29 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-def init_db():
-    from app import models  # Make sure all models are loaded
+# Add dependency for FastAPI to get a database session
+def get_db():
+    """
+    Dependency function to get a database session.
+    Yields a session that will be closed after the request is complete.
+    """
+    db = SessionLocal()
     try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    """Initialize the database by creating all tables."""
+    try:
+        # Create all tables defined in models
         Base.metadata.create_all(bind=engine)
         print("Database tables created successfully")
+        
+        # Test connection
+        test_connection()
     except Exception as e:
-        print(f"Error creating database tables: {e}")
+        print(f"Error initializing database: {e}")
 
 # Add a function to test the connection
 def test_connection():
