@@ -79,7 +79,7 @@ class LearningPath(Base):
 
     # Relationships
     sections = relationship("CourseSection", back_populates="learning_path", cascade="all, delete-orphan")
-    user_paths = relationship("UserLearningPath", back_populates="learning_path")
+    user_paths = relationship("UserLearningPath", back_populates="learning_path", cascade="all, delete-orphan")
     courses = relationship("Course", secondary="learning_path_courses", back_populates="learning_paths")
 
 class CourseSection(Base):

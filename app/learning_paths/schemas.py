@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from app.courses.schemas import CourseResponse
 
 class CourseSectionBase(BaseModel):
     title: str
@@ -23,6 +24,7 @@ class LearningPathBase(BaseModel):
     category: str
     difficulty_level: Optional[str] = None
     estimated_days: Optional[int] = None
+    is_template: Optional[bool] = True
 
 class LearningPathCreate(LearningPathBase):
     sections: Optional[List[CourseSectionCreate]] = None
@@ -48,6 +50,7 @@ class LearningPathResponse(LearningPathBase):
     sections: List[CourseSectionResponse]
     created_at: datetime
     updated_at: datetime
+    courses: List[CourseResponse] = []
 
     class Config:
         from_attributes = True

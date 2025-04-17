@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
+from app.sections.schemas import SectionResponse
 
 class CourseBase(BaseModel):
     title: str
@@ -21,6 +22,7 @@ class CourseResponse(CourseBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    sections: List[SectionResponse] = []
     
     class Config:
         from_attributes = True

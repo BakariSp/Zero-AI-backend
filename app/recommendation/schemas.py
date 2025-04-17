@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
@@ -20,6 +20,8 @@ class CardResponse(BaseModel):
     resources: Optional[List[Dict[str, str]]] = None
     level: Optional[str] = None
     tags: Optional[List[str]] = None
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
@@ -49,6 +51,8 @@ class CourseResponse(BaseModel):
     description: Optional[str]
     estimated_days: Optional[int]
     sections: List[SectionResponse] = []
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
@@ -69,6 +73,8 @@ class LearningPathResponse(BaseModel):
     estimated_days: Optional[int]
     courses: List[CourseResponse] = []
     sections: List[SectionResponse] = []  # For backwards compatibility
+    created_at: datetime
+    updated_at: datetime
     
     class Config:
         from_attributes = True
@@ -86,6 +92,10 @@ class LearningPathRequest(BaseModel):
     interests: List[str] = Field(..., min_items=1, max_items=5)
     difficulty_level: str = Field(default="intermediate", description="Difficulty level: beginner, intermediate, advanced")
     estimated_days: int = Field(default=30, ge=1, le=90, description="Estimated days to complete the learning path")
+
+class ChatPromptRequest(BaseModel):
+    """Request model for generating a learning path from a chat prompt"""
+    prompt: str
 
 class SectionWithKeywords(BaseModel):
     """Section with card keywords for the Learning Path Planner"""
@@ -116,4 +126,8 @@ class CardGenerationStatus(BaseModel):
     sections_with_cards: int
     total_cards: int
     section_progress: float
-    is_complete: bool 
+    is_complete: bool
+
+class TaskCreationResponse(BaseModel):
+    task_id: str
+    message: str

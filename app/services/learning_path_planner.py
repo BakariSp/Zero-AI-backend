@@ -130,63 +130,96 @@ class LearningPathPlannerService:
         progress_callback: Optional[callable] = None
     ) -> List[Dict[str, Any]]:
         """
-        Generate all cards for a learning path structure in parallel
-        
-        Args:
-            db: Database session
-            learning_path_structure: The structure returned by generate_complete_learning_path
-            progress_callback: Optional callback function to report progress
-            
-        Returns:
-            List of created cards with their section associations
+        Generate all cards for a learning path structure using batch processing per section.
         """
-        all_tasks = []
-        all_task_contexts = []  # To keep track of section and course for each task
-        
-        # Extract all keywords with their context from the learning path structure
+        section_tasks = []
+        section_contexts = [] # To store section_id for linking cards later
+
+        # 1. Create one task per SECTION, not per keyword
         for course in learning_path_structure.get("courses", []):
             course_title = course.get("title")
             for section in course.get("sections", []):
                 section_title = section.get("title")
                 section_id = section.get("section_id")
                 keywords = section.get("keywords", [])
-                
-                for keyword in keywords:
-                    # Create a task for each keyword
-                    task = self.card_manager.card_generator.generate_card(
-                        keyword=keyword,
-                        section_title=section_title,
-                        course_title=course_title
-                    )
-                    all_tasks.append(task)
-                    all_task_contexts.append({
-                        "section_id": section_id,
-                        "keyword": keyword
-                    })
-        
-        # Execute all card generation tasks in parallel
-        generated_cards = await asyncio.gather(*all_tasks)
-        
-        # Create cards in database and link to sections
+
+                if not keywords: # Skip sections with no keywords
+                    continue
+
+                # Create a single task for all keywords in this section
+                task = self.card_manager.card_generator.generate_cards_for_section_batch( # <--- NEW BATCH METHOD
+                    keywords=keywords,
+                    section_title=section_title,
+                    course_title=course_title
+                )
+                section_tasks.append(task)
+                # Store context needed after gather (section_id and original keywords for matching)
+                section_contexts.append({
+                    "section_id": section_id,
+                    "keywords": keywords # Keep keywords if needed to match results, or rely on order
+                })
+
+        # 2. Execute all section-batch tasks in parallel
+        # Each result in 'batch_results' will be a list of card data dicts for a section
+        batch_results = await asyncio.gather(*section_tasks, return_exceptions=True) # Handle potential errors per batch
+
+        # 3. Process results and create cards in DB
         result_cards = []
-        for i, card_data in enumerate(generated_cards):
-            section_id = all_task_contexts[i]["section_id"]
-            
-            # Create the card
-            card_db = create_card(db, card_data)
-            
-            # Associate card with section
-            add_card_to_section(db, section_id, card_db.id, i+1)
-            
-            # Add to result
-            result_cards.append({
-                "card_id": card_db.id,
-                "keyword": card_db.keyword,
-                "section_id": section_id
-            })
-            
-            # Report progress if callback provided
-            if progress_callback:
-                progress_callback(i + 1)
-            
-        return result_cards 
+        total_cards_processed = 0
+        card_order_in_section = {} # Track order within each section
+
+        for i, batch_result in enumerate(batch_results):
+            section_id = section_contexts[i]["section_id"]
+            original_keywords = section_contexts[i]["keywords"] # Get keywords for this batch
+
+            if isinstance(batch_result, Exception):
+                logging.error(f"Card generation batch failed for section {section_id}: {batch_result}")
+                # Optionally report partial failure via progress_callback or task status
+                continue # Skip this batch
+
+            if not isinstance(batch_result, list):
+                 logging.error(f"Unexpected result type for section {section_id}: {type(batch_result)}. Expected list.")
+                 continue
+
+            # Ensure the card_order_in_section counter starts at 0 for each new section
+            if section_id not in card_order_in_section:
+                card_order_in_section[section_id] = 0
+
+            # Process each card generated in the batch for this section
+            # IMPORTANT: Ensure the AI returns cards in the same order as keywords were provided,
+            # or include the original keyword in the AI response for matching.
+            # Assuming order is preserved for simplicity here:
+            for card_index, card_data in enumerate(batch_result):
+                 # Add keyword if not returned by AI but needed for Card model/DB
+                 if "keyword" not in card_data and card_index < len(original_keywords):
+                     card_data["keyword"] = original_keywords[card_index]
+
+                 # Validate card_data structure if necessary
+                 if not card_data or "keyword" not in card_data:
+                      logging.warning(f"Skipping invalid card data in batch for section {section_id}: {card_data}")
+                      continue
+
+                 # Create the card
+                 card_db = create_card(db, card_data) # Assuming create_card handles CardCreate schema
+
+                 # Associate card with section
+                 current_order = card_order_in_section[section_id]
+                 add_card_to_section(db, section_id, card_db.id, current_order + 1)
+                 card_order_in_section[section_id] += 1 # Increment order for the next card in this section
+
+                 # Add to result list
+                 result_cards.append({
+                     "card_id": card_db.id,
+                     "keyword": card_db.keyword,
+                     "section_id": section_id
+                 })
+
+                 total_cards_processed += 1
+                 # Report progress if callback provided
+                 if progress_callback:
+                     # Note: The total number of cards might need recalculation
+                     # or the progress logic might need adjustment based on batches.
+                     # This simple callback assumes progress per card processed.
+                     progress_callback(total_cards_processed)
+
+        return result_cards

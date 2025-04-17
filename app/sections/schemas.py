@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -41,15 +41,19 @@ class SectionBase(BaseModel):
     description: Optional[str] = None
 
 # 系统模板章节响应
-class SectionResponse(SectionBase):
+class SectionCardResponse(BaseModel):
+    order_index: int
+    card: CardResponse
+
+    class Config:
+        from_attributes = True
+
+class SectionResponse(BaseModel):
     id: int
-    learning_path_id: Optional[int] = None
-    order_index: Optional[int] = None
-    estimated_days: Optional[int] = None
-    created_at: datetime
-    updated_at: datetime
-    is_template: bool = True
-    cards: Optional[List[CardInSection]] = None
+    title: str
+    description: Optional[str] = None
+    order_index: int
+    card_associations: List[SectionCardResponse] = []
 
     class Config:
         from_attributes = True

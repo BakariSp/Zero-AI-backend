@@ -3,6 +3,8 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from fastapi import BackgroundTasks
+import logging
+from pydantic import BaseModel
 
 from app.db import get_db
 from app.models import (
@@ -12,12 +14,14 @@ from app.models import (
     course_section_association,  # Add this import
     CourseSection
 )
-from app.recommendation.schemas import LearningPathResponse, CourseResponse, CardResponse, RecommendationResponse, LearningPathRequest
+from app.recommendation.schemas import LearningPathResponse, CourseResponse, CardResponse, RecommendationResponse, LearningPathRequest, ChatPromptRequest
 from app.recommendation.crud import get_recommended_learning_paths, get_recommended_courses, get_recommended_cards
 from app.services.learning_path_planner import LearningPathPlannerService
 from app.auth.jwt import get_current_active_user
 from app.learning_paths.crud import assign_learning_path_to_user
-from app.services.background_tasks import schedule_learning_path_generation
+from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation
+from app.services.ai_generator import extract_learning_goals
+from app.recommendation.schemas import TaskCreationResponse
 
 router = APIRouter()
 
@@ -326,3 +330,39 @@ async def generate_cards_for_learning_path(
         "task_id": task_id,
         "message": "Card generation started. Cards are being generated in the background."
     }
+
+@router.post("/chat/generate-learning-path", response_model=TaskCreationResponse)
+async def generate_learning_path_from_chat(
+    request_body: ChatPromptRequest,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Accepts a chat prompt and schedules a background task
+    to generate the full learning path. Returns a task ID immediately.
+    """
+    try:
+        prompt = request_body.prompt
+        if not prompt:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Prompt cannot be empty")
+
+        # Schedule the comprehensive background task
+        task_id = schedule_full_learning_path_generation(
+            background_tasks=background_tasks,
+            prompt=prompt,
+            user_id=current_user.id
+        )
+
+        # Return the task ID immediately
+        return TaskCreationResponse(
+            task_id=task_id,
+            message="Learning path generation has started. You can check the status using the task ID."
+        )
+
+    except Exception as e:
+        # Catch potential errors during scheduling itself (less likely)
+        logging.error(f"Error scheduling learning path generation from chat: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to schedule learning path generation."
+        )

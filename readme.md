@@ -22,3 +22,7 @@ Zero-AI backend is built on Azure cloud services, providing the following core f
 4. Deploy to Azure Web Services
 
 For detailed deployment documentation, refer to the `docs/` directory
+
+### To run the project locally
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+

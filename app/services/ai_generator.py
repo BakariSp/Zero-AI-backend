@@ -1,10 +1,11 @@
 import os
 import logging
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 import json
 import asyncio
 from openai import AzureOpenAI
 from dotenv import load_dotenv
+import re # Import regex
 
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from app.courses.schemas import CourseCreate
@@ -30,19 +31,74 @@ class BaseAgent:
     
     @staticmethod
     def _extract_json_from_response(content: str) -> Dict:
-        """Helper method to extract JSON from model response"""
+        """Helper method to extract JSON from model response, with basic cleaning."""
+        original_content = content # Keep original for logging if needed
+        logging.debug(f"Attempting to extract JSON from: {content[:500]}...") # Log input
+
         try:
-            # Extract JSON if it's wrapped in markdown code blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-            
-            return json.loads(content)
-        except Exception as e:
-            logging.error(f"Error extracting JSON from response: {e}")
-            logging.error(f"Original content: {content}")
-            raise ValueError("Failed to parse AI response as JSON")
+            # 1. Remove potential markdown wrappers first
+            json_match = re.search(r'```(json)?\s*([\s\S]*?)\s*```', content, re.IGNORECASE)
+            if json_match:
+                content = json_match.group(2).strip()
+                logging.debug("Removed markdown wrappers.")
+            else:
+                # If no markdown, try to find the outermost JSON object/array
+                start_brace = content.find('{')
+                start_bracket = content.find('[')
+                end_brace = content.rfind('}')
+                end_bracket = content.rfind(']')
+
+                start = -1
+                end = -1
+
+                if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
+                     # Found braces, assume it's an object
+                     start = start_brace
+                     end = end_brace
+                elif start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
+                     # Found brackets, assume it's an array
+                     start = start_bracket
+                     end = end_bracket
+
+                if start != -1:
+                     content = content[start:end+1]
+                     logging.debug("Extracted content between outermost braces/brackets.")
+                # else: proceed with content as is, maybe it's already clean
+
+            # 2. Attempt direct JSON parsing
+            parsed_json = json.loads(content)
+            logging.debug("Successfully parsed JSON directly.")
+            return parsed_json
+
+        except json.JSONDecodeError as e:
+            logging.warning(f"Initial JSON parsing failed: {e}. Content snippet: {content[:200]}...")
+            # Simple cleaning attempt (e.g., for unescaped newlines) - This is basic!
+            # A more robust solution might involve a dedicated JSON fixing library
+            # or more sophisticated regex, but start simple.
+            try:
+                # Replace common issues like unescaped newlines ONLY within likely string contexts
+                # This regex is still heuristic: looks for \n not preceded by \\ within quotes
+                cleaned_content = re.sub(r'(?<!\\)\n', r'\\n', content)
+                # Potentially add more cleaning steps here if needed (e.g., for quotes)
+
+                if cleaned_content != content:
+                     logging.warning("Attempting parsing again after cleaning newlines...")
+                     parsed_json = json.loads(cleaned_content)
+                     logging.debug("Successfully parsed JSON after cleaning.")
+                     return parsed_json
+                else:
+                     # If cleaning didn't change anything, re-raise the original error
+                     raise e
+
+            except json.JSONDecodeError as e2:
+                logging.error(f"JSON parsing failed even after basic cleaning: {e2}")
+                logging.error(f"Original content snippet: {original_content[:500]}...")
+                raise ValueError(f"Failed to parse AI response as JSON: {e2}. Original content: {original_content[:200]}...")
+
+        except Exception as e: # Catch other potential errors during extraction
+            logging.error(f"Unexpected error extracting JSON: {e}")
+            logging.error(f"Original content snippet: {original_content[:500]}...")
+            raise ValueError(f"Unexpected error processing AI response: {e}")
 
 class LearningPathPlannerAgent(BaseAgent):
     """Agent responsible for generating complete learning paths with courses and sections"""
@@ -338,4 +394,65 @@ async def generate_learning_path_with_ai(
         interests=interests,
         difficulty_level=difficulty_level,
         estimated_days=estimated_days
-    ) 
+    )
+
+async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
+    """Extract learning goals from a chat prompt"""
+    try:
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are an expert at understanding learning goals and converting them into structured learning parameters."},
+                {"role": "user", "content": f"""
+                Extract learning parameters from this prompt: "{prompt}"
+                Return a JSON with:
+                - interests: list of relevant topics/keywords (be specific, e.g., ['Python', 'Data Analysis'])
+                - difficulty_level: "beginner", "intermediate", or "advanced" (default to intermediate if unsure)
+                - estimated_days: suggested number of days (between 7-90, default to 30 if unsure)
+                """}
+            ],
+            temperature=0.5, # Slightly lower temperature for more deterministic extraction
+            max_tokens=200, # Reduced tokens as the output is small
+            model=deployment,
+            response_format={"type": "json_object"} # Enforce JSON output if model supports it
+        )
+
+        content = response.choices[0].message.content
+        # Attempt to load JSON directly
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            # Fallback: try extracting from markdown if direct load fails
+            logging.warning(f"Failed to directly parse JSON, trying markdown extraction. Content: {content}")
+            if "```json" in content:
+                json_str = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                 json_str = content.split("```")[1].split("```")[0].strip()
+            else:
+                json_str = content # Assume it might be JSON without backticks
+            data = json.loads(json_str)
+
+
+        # Validate and provide defaults
+        interests = data.get("interests", [])
+        if not isinstance(interests, list) or not all(isinstance(i, str) for i in interests):
+            logging.warning(f"Invalid interests format received: {interests}. Defaulting to empty list.")
+            interests = []
+
+        difficulty = data.get("difficulty_level", "intermediate").lower()
+        if difficulty not in ["beginner", "intermediate", "advanced"]:
+            logging.warning(f"Invalid difficulty level received: {difficulty}. Defaulting to intermediate.")
+            difficulty = "intermediate"
+
+        days = data.get("estimated_days", 30)
+        if not isinstance(days, int) or not (7 <= days <= 90):
+             logging.warning(f"Invalid estimated days received: {days}. Defaulting to 30.")
+             days = 30
+
+        return (interests, difficulty, days)
+
+    except Exception as e:
+        logging.error(f"Error extracting learning goals: {e}")
+        logging.error(f"Original prompt: {prompt}")
+        # Fallback or re-raise depending on desired behavior
+        # For now, raise a specific error the endpoint can catch
+        raise ValueError(f"Failed to parse learning goals from prompt: {prompt}")
