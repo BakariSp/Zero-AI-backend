@@ -10,14 +10,15 @@ from app.learning_paths.crud import create_learning_path, assign_learning_path_t
 from app.cards.crud import create_card
 from app.courses.crud import create_course, add_section_to_course
 from app.sections.crud import create_section, add_card_to_section
-
+from openai import AsyncOpenAI
+import os
 class LearningPathPlannerService:
     """Service to handle the full learning path planning workflow"""
     
     def __init__(self):
         self.planner_agent = LearningPathPlannerAgent()
         self.card_manager = ParallelCardGeneratorManager()
-    
+        super().__init__()
     async def generate_complete_learning_path(
         self,
         db: Session,

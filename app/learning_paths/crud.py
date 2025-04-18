@@ -4,7 +4,7 @@ from fastapi import HTTPException, status
 
 from app.models import LearningPath, CourseSection, UserLearningPath, User
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
-
+from sqlalchemy.orm import joinedload
 def get_learning_path(db: Session, path_id: int) -> Optional[LearningPath]:
     return db.query(LearningPath).filter(LearningPath.id == path_id).first()
 
@@ -75,7 +75,14 @@ def delete_learning_path(db: Session, path_id: int) -> bool:
     return True
 
 def get_user_learning_paths(db: Session, user_id: int) -> List[UserLearningPath]:
-    return db.query(UserLearningPath).filter(UserLearningPath.user_id == user_id).all()
+    user_paths = (
+        db.query(UserLearningPath)
+        .options(joinedload(UserLearningPath.learning_path))
+        .filter(UserLearningPath.user_id == user_id)
+        .all()
+    )
+
+    return [path for path in user_paths if path.learning_path and path.learning_path_id]
 
 def get_user_learning_path(db: Session, user_id: int, path_id: int) -> Optional[UserLearningPath]:
     return db.query(UserLearningPath).filter(

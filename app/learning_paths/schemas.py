@@ -2,6 +2,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 from app.courses.schemas import CourseResponse
+from pydantic import BaseModel
+from typing import List
 
 class CourseSectionBase(BaseModel):
     title: str
@@ -80,6 +82,23 @@ class GenerateLearningPathRequest(BaseModel):
     interests: List[str]
     difficulty_level: Optional[str] = "intermediate"
     estimated_days: Optional[int] = 30
-    
+    existing_items: List[str] = []
     class Config:
         from_attributes = True 
+
+class GenerateDetailsFromOutlineRequest(BaseModel):
+    titles: List[str]
+    difficulty_level: str = "intermediate"
+    estimated_days: int = 30
+
+class GenerateCourseTitleRequest(BaseModel):
+    interests: List[str]
+    difficulty_level: str = "beginner"
+    estimated_days: int = 30
+    existing_items: List[str] = []
+
+
+class GenerateDetailsFromOutlineRequest(BaseModel):
+    titles: List[str]
+    difficulty_level: str = "beginner"
+    estimated_days: int = 30

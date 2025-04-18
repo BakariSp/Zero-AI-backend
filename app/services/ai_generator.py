@@ -6,11 +6,14 @@ import asyncio
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 import re # Import regex
-
+from app.services.cache import generate_cache_key, get_or_create_cached_data
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from app.courses.schemas import CourseCreate
 from app.cards.schemas import CardCreate
-
+from fastapi import APIRouter
+from pydantic import BaseModel
+from typing import List
+from app.services.learning_outline_service import LearningPathOutlineService
 # Load environment variables
 load_dotenv()
 
@@ -28,7 +31,17 @@ client = AzureOpenAI(
 
 class BaseAgent:
     """Base class for all AI agents"""
-    
+    def __init__(self):
+        from openai import AzureOpenAI
+        import os
+
+        self.client = AzureOpenAI(
+            api_version="2024-12-01-preview",
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        )
+        self.deployment = "gpt-4o" 
+        
     @staticmethod
     def _extract_json_from_response(content: str) -> Dict:
         """Helper method to extract JSON from model response, with basic cleaning."""
@@ -102,7 +115,7 @@ class BaseAgent:
 
 class LearningPathPlannerAgent(BaseAgent):
     """Agent responsible for generating complete learning paths with courses and sections"""
-    
+
     async def generate_learning_path(
         self,
         interests: List[str],
@@ -111,23 +124,21 @@ class LearningPathPlannerAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Generate a complete learning path with courses and sections"""
         try:
-            # 生成缓存键
             from app.services.cache import generate_cache_key, get_or_create_cached_data
-            
+
             cache_params = {
                 "interests": sorted(interests),
                 "difficulty_level": difficulty_level,
                 "estimated_days": estimated_days
             }
             cache_key = generate_cache_key("learning_path", cache_params)
-            
-            # 使用缓存
+
             async def create_learning_path():
                 interests_str = ", ".join(interests)
                 prompt = f"""
                 Create a complete structured learning path for someone interested in {interests_str}.
                 The learning path should be at {difficulty_level} level and designed to be completed in approximately {estimated_days} days.
-                
+
                 The learning path should include:
                 1. A title for the learning path
                 2. A brief description of the learning path
@@ -140,7 +151,7 @@ class LearningPathPlannerAgent(BaseAgent):
                    - A brief description
                    - An estimated number of days to complete
                    - 5-10 keyword suggestions for cards (just the keywords, not the full content)
-                
+
                 Format the response as a JSON object with the following structure:
                 {{
                     "learning_path": {{
@@ -163,15 +174,13 @@ class LearningPathPlannerAgent(BaseAgent):
                                     "order_index": 1,
                                     "estimated_days": 3,
                                     "card_keywords": ["Keyword 1", "Keyword 2", "Keyword 3"]
-                                }},
-                                ...
+                                }}
                             ]
-                        }},
-                        ...
+                        }}
                     ]
                 }}
                 """
-                
+
                 response = client.chat.completions.create(
                     messages=[
                         {"role": "system", "content": "You are an expert curriculum designer who creates detailed learning paths."},
@@ -181,22 +190,66 @@ class LearningPathPlannerAgent(BaseAgent):
                     max_tokens=3000,
                     model=deployment
                 )
-                
+
                 content = response.choices[0].message.content.strip()
                 data = self._extract_json_from_response(content)
-                
                 return data
-            
-            # 获取或创建缓存数据
+
             data, from_cache = await get_or_create_cached_data(cache_key, create_learning_path)
             if from_cache:
                 logging.info(f"Retrieved learning path from cache for interests: {interests}")
-            
+
             return data
-        
+
         except Exception as e:
             logging.error(f"Error in learning path planner agent: {e}")
             raise
+
+    async def generate_outline(
+        self,
+        interests: Union[str, List[str]],
+        difficulty_level: str = "intermediate",
+        estimated_days: int = 30
+    ) -> List[str]:
+        """Generate a high-level outline only (section titles)"""
+        try:
+            if isinstance(interests, list):
+                interests_str = ", ".join(interests)
+            else:
+                interests_str = interests
+
+            prompt = f"""
+                    Create a high-level learning path outline for the topic: "{interests_str}".
+                    Difficulty: {difficulty_level}, Duration: ~{estimated_days} days.
+
+                    Return only a numbered list of section titles. Do not include descriptions.
+
+                    Format:
+                    1. Section title
+                    2. Section title
+                    ...
+                    """
+
+            response = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that creates structured learning outlines."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.5,
+                max_tokens=800,
+                model=deployment
+            )
+
+            content = response.choices[0].message.content.strip()
+            lines = content.split("\n")
+            outline = [line.lstrip("0123456789. ").strip() for line in lines if line.strip()]
+            return outline
+
+        except Exception as e:
+            logging.error(f"Error generating outline: {e}")
+            raise
+
+        
 
 class CardGeneratorAgent(BaseAgent):
     """Agent responsible for generating detailed card content from keywords"""
@@ -456,3 +509,4 @@ async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
         # Fallback or re-raise depending on desired behavior
         # For now, raise a specific error the endpoint can catch
         raise ValueError(f"Failed to parse learning goals from prompt: {prompt}")
+    

@@ -28,6 +28,21 @@ from app.learning_paths.crud import (
     update_user_learning_path_progress
 )
 from app.services.ai_generator import generate_learning_path_with_ai
+from app.services.learning_outline_service import LearningPathOutlineService
+from app.services.ai_generator import LearningPathPlannerAgent
+from app.services.learning_detail_service import LearningPathDetailService
+from app.learning_paths.schemas import GenerateDetailsFromOutlineRequest
+from app.services.learning_outline_service import LearningPathOutlineService
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List
+import logging
+from app.services.learning_detail_service import LearningPathDetailService
+from pydantic import BaseModel
+from typing import List, Dict, Any
+from pydantic import BaseModel
+from typing import List
+from app.learning_paths.schemas import GenerateCourseTitleRequest
 
 router = APIRouter()
 
@@ -211,3 +226,83 @@ async def generate_ai_learning_path(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate learning path: {str(e)}"
         ) 
+    
+
+
+@router.post("/generate-learning-courses")
+async def generate_learning_courses(request: GenerateLearningPathRequest):
+    try:
+        outline_service = LearningPathOutlineService()
+        detail_service = LearningPathDetailService()
+
+        # 1. 生成 course outline（课程标题）
+        all_titles = await outline_service.generate_outline(
+            interests=request.interests,
+            difficulty_level=request.difficulty_level,
+            estimated_days=request.estimated_days
+        )
+
+        # 2. 去掉已有的，最多取 5 个
+        new_titles = [title for title in all_titles if title not in request.existing_items][:5]
+
+        # 3. 生成每个 title 对应的 detail（section），限制每个不超过 4 个
+        detailed_results = await detail_service.generate_from_outline(
+            titles=new_titles,
+            difficulty_level=request.difficulty_level,
+            estimated_days=request.estimated_days
+        )
+
+        # 4. 只保留每个 title 的前 4 个 sections（如果超出）
+        structured = []
+        for course in detailed_results.get("courses", []):
+            structured.append({
+                "title": course["title"],
+                "sections": course.get("sections", [])[:4]
+            })
+
+        return {"courses": structured}
+
+    except Exception as e:
+        logging.error(f"Failed to generate courses with sections: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate courses with sections")
+
+
+
+@router.post("/generate-course-titles")
+async def generate_course_titles(request: GenerateCourseTitleRequest):
+    try:
+        service = LearningPathOutlineService()
+        outline = await service.generate_outline(
+            interests=request.interests,
+            difficulty_level=request.difficulty_level,
+            estimated_days=request.estimated_days
+        )
+        filtered = [item for item in outline if item not in request.existing_items]
+        return {"titles": filtered[:5]}  # 最多返回5个
+    except Exception as e:
+        logging.error(f"Failed to generate course titles: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate course titles")
+
+
+@router.post("/generate-sections")
+async def generate_sections_from_titles(request: GenerateDetailsFromOutlineRequest):
+    try:
+        detail_service = LearningPathDetailService()
+        detailed_results = await detail_service.generate_from_outline(
+            titles=request.titles,
+            difficulty_level=request.difficulty_level,
+            estimated_days=request.estimated_days
+        )
+
+        # 最多保留每个 course 的前 4 个 section
+        structured = []
+        for course in detailed_results.get("courses", []):
+            structured.append({
+                "title": course["title"],
+                "sections": course.get("sections", [])[:4]
+            })
+
+        return {"courses": structured}
+    except Exception as e:
+        logging.error(f"Failed to generate sections: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate sections")
