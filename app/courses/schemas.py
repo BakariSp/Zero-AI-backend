@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 from app.sections.schemas import SectionResponse
+from app.cards.schemas import CardResponse, Resource
 
 class CourseBase(BaseModel):
     title: str

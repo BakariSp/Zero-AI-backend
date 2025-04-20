@@ -13,7 +13,7 @@ from app.cards.schemas import CardCreate
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List
-from app.services.learning_outline_service import LearningPathOutlineService
+
 # Load environment variables
 load_dotenv()
 
@@ -29,89 +29,100 @@ client = AzureOpenAI(
     api_key=subscription_key,
 )
 
+# --- General Azure OpenAI Configuration ---
+GENERAL_API_KEY = os.getenv("AZURE_OPENAI_KEY")
+GENERAL_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+GENERAL_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") # Deployment for general tasks like path planning
+GENERAL_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01") # Or your preferred general API version
+
+general_client = AzureOpenAI(
+    api_version=GENERAL_API_VERSION,
+    azure_endpoint=GENERAL_ENDPOINT,
+    api_key=GENERAL_API_KEY
+)
+
+# --- Card Generation Fine-Tuned Model Configuration ---
+CARD_API_KEY = os.getenv("CARD_MODEL_AZURE_OPENAI_KEY", GENERAL_API_KEY) # Fallback to general key if not set
+CARD_ENDPOINT = os.getenv("CARD_MODEL_AZURE_OPENAI_ENDPOINT", GENERAL_ENDPOINT) # Fallback to general endpoint
+CARD_DEPLOYMENT = os.getenv("CARD_MODEL_AZURE_DEPLOYMENT_NAME") # Deployment for fine-tuned card generation
+CARD_API_VERSION = os.getenv("CARD_MODEL_AZURE_API_VERSION", GENERAL_API_VERSION) # Add this missing line
+
+card_client = AzureOpenAI(
+    api_version=CARD_API_VERSION,
+    azure_endpoint=CARD_ENDPOINT,
+    api_key=CARD_API_KEY
+)
+
 class BaseAgent:
     """Base class for all AI agents"""
-    def __init__(self):
-        from openai import AzureOpenAI
-        import os
+    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+        if client is None or deployment is None:
+             raise ValueError(f"{self.__class__.__name__} requires a valid AzureOpenAI client and deployment name.")
+        self.client = client
+        self.deployment = deployment
+        logging.info(f"Initialized {self.__class__.__name__} with deployment '{self.deployment}'")
 
-        self.client = AzureOpenAI(
-            api_version="2024-12-01-preview",
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-        )
-        self.deployment = "gpt-4o" 
-        
-    @staticmethod
-    def _extract_json_from_response(content: str) -> Dict:
-        """Helper method to extract JSON from model response, with basic cleaning."""
+    def _extract_json_from_response(self, content: str) -> Any:
+        """Extracts JSON object or list from potentially messy AI response."""
         original_content = content # Keep original for logging if needed
         logging.debug(f"Attempting to extract JSON from: {content[:500]}...") # Log input
 
         try:
-            # 1. Remove potential markdown wrappers first
-            json_match = re.search(r'```(json)?\s*([\s\S]*?)\s*```', content, re.IGNORECASE)
+            # Try finding JSON within ```json ... ``` blocks
+            match = re.search(r"```json\s*([\s\S]*?)\s*```", content, re.DOTALL)
+            if match:
+                json_str = match.group(1).strip()
+                return json.loads(json_str)
+
+            # Try finding JSON starting with { or [ potentially after some text
+            json_match = re.search(r"^\s*.*?([{].*|\[.*)", content, re.DOTALL | re.MULTILINE)
             if json_match:
-                content = json_match.group(2).strip()
-                logging.debug("Removed markdown wrappers.")
-            else:
-                # If no markdown, try to find the outermost JSON object/array
-                start_brace = content.find('{')
-                start_bracket = content.find('[')
-                end_brace = content.rfind('}')
-                end_bracket = content.rfind(']')
+                 potential_json = json_match.group(1)
+                 try:
+                     # Attempt to parse from the first opening brace/bracket
+                     return json.loads(potential_json)
+                 except json.JSONDecodeError as e:
+                     logging.warning(f"Initial JSON parse failed: {e}. Trying cleanup.")
+                     # Attempt to find the last valid closing brace/bracket
+                     # This is heuristic and might fail for complex cases
+                     open_brackets = 0
+                     last_valid_index = -1
+                     if potential_json.startswith('['):
+                         open_char, close_char = '[', ']'
+                     elif potential_json.startswith('{'):
+                         open_char, close_char = '{', '}'
+                     else:
+                         raise ValueError("Response does not start with { or [")
 
-                start = -1
-                end = -1
+                     for i, char in enumerate(potential_json):
+                         if char == open_char:
+                             open_brackets += 1
+                         elif char == close_char:
+                             open_brackets -= 1
+                             if open_brackets == 0:
+                                 last_valid_index = i
+                                 break # Found the matching closer for the first opener
 
-                if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
-                     # Found braces, assume it's an object
-                     start = start_brace
-                     end = end_brace
-                elif start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
-                     # Found brackets, assume it's an array
-                     start = start_bracket
-                     end = end_bracket
+                     if last_valid_index != -1:
+                         cleaned_json_str = potential_json[:last_valid_index + 1]
+                         try:
+                             return json.loads(cleaned_json_str)
+                         except json.JSONDecodeError as final_e:
+                             logging.error(f"Failed to parse cleaned JSON: {final_e}. Cleaned string: {cleaned_json_str}")
+                             raise ValueError(f"Could not extract valid JSON after cleanup: {final_e}") from final_e
+                     else:
+                         raise ValueError("Could not find matching closing bracket/brace.")
 
-                if start != -1:
-                     content = content[start:end+1]
-                     logging.debug("Extracted content between outermost braces/brackets.")
-                # else: proceed with content as is, maybe it's already clean
 
-            # 2. Attempt direct JSON parsing
-            parsed_json = json.loads(content)
-            logging.debug("Successfully parsed JSON directly.")
-            return parsed_json
+            # If no specific markers, try parsing the whole content directly
+            return json.loads(content)
 
         except json.JSONDecodeError as e:
-            logging.warning(f"Initial JSON parsing failed: {e}. Content snippet: {content[:200]}...")
-            # Simple cleaning attempt (e.g., for unescaped newlines) - This is basic!
-            # A more robust solution might involve a dedicated JSON fixing library
-            # or more sophisticated regex, but start simple.
-            try:
-                # Replace common issues like unescaped newlines ONLY within likely string contexts
-                # This regex is still heuristic: looks for \n not preceded by \\ within quotes
-                cleaned_content = re.sub(r'(?<!\\)\n', r'\\n', content)
-                # Potentially add more cleaning steps here if needed (e.g., for quotes)
-
-                if cleaned_content != content:
-                     logging.warning("Attempting parsing again after cleaning newlines...")
-                     parsed_json = json.loads(cleaned_content)
-                     logging.debug("Successfully parsed JSON after cleaning.")
-                     return parsed_json
-                else:
-                     # If cleaning didn't change anything, re-raise the original error
-                     raise e
-
-            except json.JSONDecodeError as e2:
-                logging.error(f"JSON parsing failed even after basic cleaning: {e2}")
-                logging.error(f"Original content snippet: {original_content[:500]}...")
-                raise ValueError(f"Failed to parse AI response as JSON: {e2}. Original content: {original_content[:200]}...")
-
-        except Exception as e: # Catch other potential errors during extraction
-            logging.error(f"Unexpected error extracting JSON: {e}")
-            logging.error(f"Original content snippet: {original_content[:500]}...")
-            raise ValueError(f"Unexpected error processing AI response: {e}")
+            logging.error(f"Failed to decode JSON response: {e}. Response content: {content}")
+            raise ValueError(f"Invalid JSON response from AI: {e}") from e
+        except Exception as e:
+            logging.error(f"Error extracting JSON: {e}. Content: {content}")
+            raise
 
 class LearningPathPlannerAgent(BaseAgent):
     """Agent responsible for generating complete learning paths with courses and sections"""
@@ -129,7 +140,8 @@ class LearningPathPlannerAgent(BaseAgent):
             cache_params = {
                 "interests": sorted(interests),
                 "difficulty_level": difficulty_level,
-                "estimated_days": estimated_days
+                "estimated_days": estimated_days,
+                "version": "1.1" # Increment version if prompt changes significantly
             }
             cache_key = generate_cache_key("learning_path", cache_params)
 
@@ -166,33 +178,41 @@ class LearningPathPlannerAgent(BaseAgent):
                             "title": "Course 1 Title",
                             "description": "Course 1 description",
                             "order_index": 1,
-                            "estimated_days": 10,
+                            "estimated_days": 10, // Estimated days for the whole course
                             "sections": [
                                 {{
                                     "title": "Section 1 Title",
                                     "description": "Section 1 description",
                                     "order_index": 1,
-                                    "estimated_days": 3,
+                                    "estimated_days": 3, // Estimated days for this section
                                     "card_keywords": ["Keyword 1", "Keyword 2", "Keyword 3"]
                                 }}
+                                // ... more sections
                             ]
                         }}
+                        // ... more courses
                     ]
                 }}
+                Ensure the output is ONLY the JSON object, starting with {{ and ending with }}.
                 """
 
-                response = client.chat.completions.create(
+                logging.debug(f"Generating learning path with prompt:\n{prompt}")
+                response = await asyncio.to_thread( # Use asyncio.to_thread for blocking call
+                    self.client.chat.completions.create, # Use self.client
                     messages=[
-                        {"role": "system", "content": "You are an expert curriculum designer who creates detailed learning paths."},
+                        {"role": "system", "content": "You are an expert curriculum designer who creates detailed learning paths in JSON format."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.7,
-                    max_tokens=3000,
-                    model=deployment
+                    temperature=0.6, # Slightly lower temp for structured output
+                    max_tokens=3500, # Adjust as needed
+                    model=self.deployment, # Use self.deployment
+                    response_format={"type": "json_object"} # Request JSON output
                 )
 
                 content = response.choices[0].message.content.strip()
+                logging.debug(f"Raw learning path response:\n{content}")
                 data = self._extract_json_from_response(content)
+                # Add validation here if needed (e.g., using Pydantic models)
                 return data
 
             data, from_cache = await get_or_create_cached_data(cache_key, create_learning_path)
@@ -202,7 +222,7 @@ class LearningPathPlannerAgent(BaseAgent):
             return data
 
         except Exception as e:
-            logging.error(f"Error in learning path planner agent: {e}")
+            logging.error(f"Error in learning path planner agent: {e}", exc_info=True)
             raise
 
     async def generate_outline(
@@ -219,10 +239,10 @@ class LearningPathPlannerAgent(BaseAgent):
                 interests_str = interests
 
             prompt = f"""
-                    Create a high-level learning path outline for the topic: "{interests_str}".
+                    Create a high-level learning path outline (section titles only) for the topic: "{interests_str}".
                     Difficulty: {difficulty_level}, Duration: ~{estimated_days} days.
 
-                    Return only a numbered list of section titles. Do not include descriptions.
+                    Return only a numbered list of section titles. Do not include descriptions or any other text.
 
                     Format:
                     1. Section title
@@ -230,26 +250,127 @@ class LearningPathPlannerAgent(BaseAgent):
                     ...
                     """
 
-            response = client.chat.completions.create(
+            response = await asyncio.to_thread( # Use asyncio.to_thread
+                self.client.chat.completions.create, # Use self.client
                 messages=[
                     {"role": "system", "content": "You are a helpful assistant that creates structured learning outlines."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.5,
                 max_tokens=800,
-                model=deployment
+                model=self.deployment # Use self.deployment
             )
 
             content = response.choices[0].message.content.strip()
             lines = content.split("\n")
-            outline = [line.lstrip("0123456789. ").strip() for line in lines if line.strip()]
+            # Improved parsing to handle potential variations
+            outline = []
+            for line in lines:
+                 line = line.strip()
+                 if not line:
+                     continue
+                 # Remove leading numbers, periods, spaces
+                 cleaned_line = re.sub(r"^\s*\d+\.?\s*", "", line).strip()
+                 if cleaned_line:
+                    outline.append(cleaned_line)
             return outline
 
         except Exception as e:
-            logging.error(f"Error generating outline: {e}")
+            logging.error(f"Error generating outline: {e}", exc_info=True)
             raise
 
-        
+    async def generate_courses_from_titles(
+        self,
+        titles: List[str],
+        difficulty_level: str,
+        estimated_days: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Generates detailed course and section structures from a list of course titles.
+        """
+        try:
+            titles_str = "\n".join(f"- {title}" for title in titles) # Use simple list format
+            num_titles = len(titles)
+            avg_days_per_course = estimated_days // max(num_titles, 1)
+
+            prompt = f"""
+            You are given {num_titles} course titles:
+            {titles_str}
+
+            Your task is to generate a detailed course object for EACH of these {num_titles} titles.
+            Each course object must include:
+            - title: The exact title from the input list above.
+            - description: A brief description relevant to the course title.
+            - estimated_days: An estimated number of days for this specific course (aim for around {avg_days_per_course} days).
+            - sections: A list of 3-5 section objects for this course, each section object including:
+                - title: A relevant title for the section within the course.
+                - description: A brief description of the section's content.
+                - estimated_days: An estimated number of days for this section (e.g., 1-3 days).
+                - card_keywords: A list of 5-10 specific keywords relevant to the section's content.
+
+            The overall learning path is intended for a {difficulty_level} level and should take approximately {estimated_days} total days.
+
+            Return the result ONLY as a single JSON list containing exactly {num_titles} course objects, one for each input title. Ensure the list starts with '[' and ends with ']'. Do not include any introductory text or markdown formatting.
+
+            Example structure for the *complete* JSON list output (if 2 titles were provided):
+            [
+              {{
+                "title": "Title 1 From Input List",
+                "description": "Description for course 1.",
+                "estimated_days": {avg_days_per_course},
+                "sections": [ {{...section data...}}, {{...section data...}} ]
+              }},
+              {{
+                "title": "Title 2 From Input List",
+                "description": "Description for course 2.",
+                "estimated_days": {avg_days_per_course},
+                "sections": [ {{...section data...}}, {{...section data...}} ]
+              }}
+            ]
+            """
+
+            logging.debug(f"Generating course details for {num_titles} titles with prompt:\n{prompt}") # Log num_titles
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                messages=[
+                    {"role": "system", "content": "You are an expert curriculum designer. You create detailed course structures including sections and keywords for EACH provided course title, outputting ONLY a valid JSON list containing all results."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.6,
+                # --- INCREASE MAX TOKENS ---
+                max_tokens=3500, # Increased from 2500
+                # --- END INCREASE ---
+                model=self.deployment,
+                response_format={"type": "json_object"}
+            )
+
+            content = response.choices[0].message.content.strip()
+            logging.debug(f"Raw course details response:\n{content}")
+            data = self._extract_json_from_response(content)
+
+            logging.debug(f"Parsed course details data type: {type(data)}")
+            if isinstance(data, dict):
+                logging.debug(f"Parsed course details dictionary keys: {data.keys()}")
+
+
+            # --- Validation Section (from previous fix) ---
+            if isinstance(data, dict) and isinstance(data.get("courses"), list):
+                 logging.debug("AI response was a dict with 'courses' key.")
+                 return data["courses"]
+            elif isinstance(data, list):
+                 logging.debug("AI response was a list.")
+                 return data
+            elif isinstance(data, dict) and "title" in data and "sections" in data:
+                 logging.debug("AI response was a single course dictionary. Wrapping in a list.")
+                 return [data]
+            else:
+                 logging.error(f"AI response for course details was not a list, {{'courses': list}}, or a single course dict. Type: {type(data)}. Data: {data}")
+                 raise ValueError("Invalid response format from AI for course details.")
+            # --- End Validation Section ---
+
+        except Exception as e:
+            logging.error(f"Error generating course details from titles: {e}", exc_info=True)
+            raise
 
 class CardGeneratorAgent(BaseAgent):
     """Agent responsible for generating detailed card content from keywords"""
@@ -259,195 +380,386 @@ class CardGeneratorAgent(BaseAgent):
         keyword: str,
         context: Optional[str] = None,
         section_title: Optional[str] = None,
-        course_title: Optional[str] = None
+        course_title: Optional[str] = None,
+        difficulty: str = "intermediate" # Add difficulty
     ) -> CardCreate:
         """Generate a detailed card for a keyword with context"""
         try:
-            # 生成缓存键
-            from app.services.cache import generate_cache_key, get_or_create_cached_data
-            
+            # --- Cache versioning ---
             cache_params = {
                 "keyword": keyword,
                 "context": context,
                 "section_title": section_title,
-                "course_title": course_title
+                "course_title": course_title,
+                "difficulty": difficulty,
+                "version": "1.2" # Incremented version due to prompt change
             }
-            cache_key = generate_cache_key("card", cache_params)
-            
-            # 使用缓存
-            async def create_card():
-                # Create a richer context for better card generation
-                context_parts = []
-                if context:
-                    context_parts.append(f"Context: {context}")
-                if section_title:
-                    context_parts.append(f"Section: {section_title}")
-                if course_title:
-                    context_parts.append(f"Course: {course_title}")
-                    
-                context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
-                
-                prompt = f"""
-                {context_str}Create a detailed explanation card for the keyword "{keyword}".
-                
-                The card should include:
-                1. A clear explanation of the concept (3-5 paragraphs)
-                2. A practical example that illustrates the concept
-                3. A list of 3-5 resources for further learning (URLs with titles)
-                4. Appropriate tags for categorization (at least 3 tags)
-                
-                Format the response as a JSON object with the following structure:
-                {{
-                    "keyword": "{keyword}",
-                    "explanation": "Detailed explanation of the concept",
-                    "example": "Practical example of the concept",
-                    "resources": [
-                        {{ "title": "Resource 1 Title", "url": "https://example.com/resource1" }},
-                        {{ "title": "Resource 2 Title", "url": "https://example.com/resource2" }}
-                    ],
-                    "tags": ["tag1", "tag2", "tag3"],
-                    "level": "beginner" // or "intermediate" or "advanced"
-                }}
-                """
-                
-                response = client.chat.completions.create(
+            cache_key = generate_cache_key("single_card", cache_params)
+            # --- End Cache versioning ---
+
+            context_parts = []
+            if course_title:
+                context_parts.append(f"Course: {course_title}")
+            if section_title:
+                context_parts.append(f"Section: {section_title}")
+            if context:
+                context_parts.append(f"General Context: {context}")
+            # Keep difficulty as it's a variable parameter
+            context_parts.append(f"Target Difficulty: {difficulty}")
+
+            context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
+
+            # --- Detailed Prompt for General Model ---
+            prompt = f"""
+            You are an expert educational content creator specializing in flashcards.
+            Based on the provided keyword and context, generate a single educational flashcard.
+
+            Context:
+            {context_str}
+            Keyword: "{keyword}"
+            Target Difficulty: {difficulty}
+
+            Format the response as a single JSON object with the following exact structure and fields:
+            {{
+                "keyword": "{keyword}",
+                "question": "A clear question related to the keyword.",
+                "answer": "A concise and accurate answer to the question.",
+                "explanation": "A brief explanation providing more context or detail about the answer.",
+                "difficulty": "{difficulty}" // Should match the target difficulty
+                // Optional fields below (include if relevant and possible):
+                // "resources": [{{ "url": "valid_url", "title": "Resource Title" }}], // List of relevant resource URLs and titles
+                // "tags": ["tag1", "tag2"] // List of relevant keywords or tags
+            }}
+
+            Ensure the output is ONLY the JSON object, starting with {{ and ending with }}. Do not include any introductory text, markdown formatting, or explanations outside the JSON structure.
+            """
+            # --- End Detailed Prompt ---
+
+            logging.debug(f"Generating single card with detailed prompt:\n{prompt}")
+            response = await asyncio.to_thread( # Use asyncio.to_thread
+                self.client.chat.completions.create, # Use self.client
+                messages=[
+                    # System message is still useful for setting the role
+                    {"role": "system", "content": "You are an expert educational content creator who outputs flashcard data in JSON format."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7, # Adjust temperature as needed
+                max_tokens=1000,
+                model=self.deployment, # Use self.deployment
+                response_format={"type": "json_object"} # Still request JSON
+            )
+
+            content = response.choices[0].message.content.strip()
+            logging.debug(f"Raw single card response:\n{content}")
+            data = self._extract_json_from_response(content)
+
+            # --- Keep Validation ---
+            required_fields = ["keyword", "question", "answer", "explanation", "difficulty"]
+            if not isinstance(data, dict) or not all(field in data for field in required_fields):
+                 logging.error(f"Fine-tuned model response missing required fields or not a dict for keyword '{keyword}'. Data: {data}")
+                 raise ValueError("Fine-tuned model response missing required fields or not a dict.")
+
+            data['difficulty'] = data.get('difficulty', difficulty)
+            card_obj = CardCreate(**data)
+            return card_obj.dict() # Return dict for caching
+
+        except Exception as e:
+            logging.error(f"Error in card generator agent (single card): {e}", exc_info=True)
+            raise
+
+    async def generate_multiple_cards_from_topic(
+        self,
+        topic: str,
+        num_cards: int,
+        course_title: Optional[str] = None,
+        difficulty: str = "intermediate"
+    ) -> List[CardCreate]:
+        """Generate multiple distinct cards related to a central topic."""
+        logging.info(f"Generating {num_cards} cards for topic: '{topic}' (Course: {course_title}, Difficulty: {difficulty}) using deployment '{self.deployment}'")
+        # --- Cache versioning ---
+        cache_params = {
+            "topic": topic,
+            "num_cards": num_cards,
+            "difficulty": difficulty,
+            "course": course_title,
+            "version": "1.3" # Incremented version due to prompt change
+        }
+        cache_key = generate_cache_key("cards_from_topic", cache_params)
+        # --- End Cache versioning ---
+
+        async def create_cards():
+            context_parts = []
+            if course_title:
+                context_parts.append(f"Course Context: {course_title}")
+            # Keep difficulty as it's a variable parameter
+            context_parts.append(f"Target Difficulty: {difficulty}")
+            context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
+
+            # --- Detailed Prompt for General Model ---
+            prompt = f"""
+            You are an expert educational content creator specializing in flashcards.
+            Based on the provided topic and context, generate exactly {num_cards} distinct educational flashcards.
+
+            Context:
+            {context_str}
+            Topic: "{topic}"
+            Number of cards to generate: {num_cards}
+            Target Difficulty for all cards: {difficulty}
+
+            Format the response as a single JSON object containing a key named "cards". The value of "cards" should be a JSON list, where each element is a flashcard object.
+            Each flashcard object in the list must have the following exact structure and fields:
+            {{
+                "keyword": "A specific keyword related to the topic for this card.",
+                "question": "A clear question related to the keyword.",
+                "answer": "A concise and accurate answer to the question.",
+                "explanation": "A brief explanation providing more context or detail about the answer.",
+                "difficulty": "{difficulty}" // Should match the target difficulty
+                // Optional fields below (include if relevant and possible):
+                // "resources": [{{ "url": "valid_url", "title": "Resource Title" }}], // List of relevant resource URLs and titles
+                // "tags": ["tag1", "tag2"] // List of relevant keywords or tags
+            }}
+
+            Example structure for the final output:
+            {{
+                "cards": [
+                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}" }},
+                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}" }}
+                    // ... (total of {num_cards} card objects)
+                ]
+            }}
+
+            Ensure the output is ONLY the JSON object containing the 'cards' list, starting with {{ and ending with }}. Do not include any introductory text, markdown formatting, or explanations outside the JSON structure. Ensure all {num_cards} requested cards are generated.
+            """
+            # --- End Detailed Prompt ---
+
+            logging.debug(f"Generating multiple cards with detailed prompt:\n{prompt}")
+            try:
+                response = await asyncio.to_thread( # Use asyncio.to_thread
+                    self.client.chat.completions.create, # Use self.client
+                    model=self.deployment, # Use self.deployment
                     messages=[
-                        {"role": "system", "content": "You are an expert educator who creates clear, comprehensive explanations."},
+                        # System message is still useful
+                        {"role": "system", "content": "You are an expert educational content creator who outputs lists of flashcard data in JSON format."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.7,
-                    max_tokens=1500,
-                    model=deployment
+                    temperature=0.7, # Adjust temperature as needed
+                    max_tokens=300 * num_cards + 500, # Adjusted token estimate slightly
+                    response_format={"type": "json_object"} # Still request JSON
                 )
-                
-                content = response.choices[0].message.content.strip()
-                data = self._extract_json_from_response(content)
-                
-                # Create card
-                card = CardCreate(
-                    keyword=data.get("keyword", keyword),
-                    explanation=data.get("explanation", ""),
-                    example=data.get("example", ""),
-                    resources=data.get("resources", []),
-                    tags=data.get("tags", []),
-                    level=data.get("level", "beginner")
-                )
-                
-                return card
-            
-            # 获取或创建缓存数据
-            card, from_cache = await get_or_create_cached_data(cache_key, create_card)
-            if from_cache:
-                logging.info(f"Retrieved card from cache for keyword: {keyword}")
-            
-            return card
-        
+                content = response.choices[0].message.content
+                logging.debug(f"Raw AI response for topic '{topic}':\n---\n{content}\n---")
+                extracted_json = self._extract_json_from_response(content)
+                logging.debug(f"Extracted JSON type for topic '{topic}': {type(extracted_json)}")
+                logging.debug(f"Extracted JSON content (first 500 chars): {str(extracted_json)[:500]}") # Log the actual extracted data
+
+                # --- Keep Robust Validation ---
+                card_list_data = None # Initialize to None
+                if isinstance(extracted_json, dict) and "cards" in extracted_json and isinstance(extracted_json.get("cards"), list):
+                     logging.debug(f"Validation: Found 'cards' key with a list for topic '{topic}'.")
+                     card_list_data = extracted_json["cards"]
+                elif isinstance(extracted_json, dict) and "flashcards" in extracted_json and isinstance(extracted_json.get("flashcards"), list):
+                     logging.debug(f"Validation: Found 'flashcards' key with a list for topic '{topic}'.")
+                     card_list_data = extracted_json["flashcards"] # Extract from 'flashcards' key
+                elif isinstance(extracted_json, list):
+                     logging.debug(f"Validation: Extracted JSON is a direct list for topic '{topic}'.")
+                     card_list_data = extracted_json
+                else:
+                     # Log the problematic data before raising
+                     logging.error(f"Validation failed for topic '{topic}'. Extracted JSON type: {type(extracted_json)}. Value: {extracted_json}")
+                     # Update the error message slightly to reflect the accepted formats
+                     raise ValueError("Fine-tuned model response was not in the expected list, {'cards': list}, or {'flashcards': list} format.") # Updated error message
+
+                if not card_list_data:
+                    logging.warning(f"Fine-tuned model returned an empty list of cards for topic '{topic}'.")
+                    return []
+
+                validated_cards = []
+                required_fields = ["keyword", "question", "answer", "explanation"]
+                for i, card_dict in enumerate(card_list_data):
+                    if not isinstance(card_dict, dict):
+                        logging.warning(f"Skipping item {i} in list for topic '{topic}' as it's not a dictionary. Item: {card_dict}")
+                        continue
+
+                    if not all(field in card_dict for field in required_fields):
+                         logging.warning(f"Skipping card from fine-tuned model due to missing required fields for topic '{topic}'. Required: {required_fields}. Data: {card_dict}")
+                         continue
+                    try:
+                        card_dict['difficulty'] = card_dict.get('difficulty', difficulty)
+                        validated_cards.append(CardCreate(**card_dict))
+
+                    except Exception as validation_err:
+                        logging.warning(f"Skipping card due to validation error for topic '{topic}': {validation_err}. Data: {card_dict}")
+
+                logging.info(f"Successfully validated {len(validated_cards)} cards out of {len(card_list_data)} received for topic '{topic}'.")
+                return [card.dict() for card in validated_cards] # Return list of dicts for caching
+
+            except Exception as e:
+                logging.error(f"Error generating cards for topic '{topic}': {e}", exc_info=True)
+                raise
+
+        # Get from cache or create
+        data, from_cache = await get_or_create_cached_data(cache_key, create_cards) # Pass updated key
+
+        if from_cache:
+            logging.info(f"Retrieved {len(data)} cards from cache for topic: {topic}")
+        else:
+             logging.info(f"Generated {len(data)} new cards for topic: {topic}")
+
+        # Ensure data is parsed back into CardCreate objects AFTER retrieving/generating
+        try:
+            return [CardCreate(**item) for item in data]
         except Exception as e:
-            logging.error(f"Error in card generator agent: {e}")
-            raise
+             logging.error(f"Failed to parse final CardCreate objects for key {cache_key}: {e}. Data: {data}", exc_info=True)
+             return []
+
+    async def generate_cards_for_section_batch(self, section_topic: str, num_cards: int) -> List[Dict[str, Any]]:
+        """
+        Generates a batch of cards for a given section topic.
+        (This is a placeholder - implement the actual logic using self.client)
+        """
+        logging.info(f"Generating {num_cards} cards for section: {section_topic}")
+        # --- Add your actual OpenAI call and JSON parsing logic here ---
+        # Example structure of what it might return:
+        generated_cards = []
+        for i in range(num_cards):
+            # Simulate generation
+            await asyncio.sleep(0.1) # Simulate async work
+            generated_cards.append({
+                "keyword": f"{section_topic} Keyword {i+1}",
+                "question": f"What is {section_topic} Keyword {i+1}?",
+                "answer": f"This is the answer for {section_topic} Keyword {i+1}.",
+                "explanation": f"Detailed explanation for {section_topic} Keyword {i+1}.",
+                "difficulty": "medium"
+            })
+        logging.info(f"Finished generating cards for section: {section_topic}")
+        return generated_cards
 
 class ParallelCardGeneratorManager:
     """Manager for generating multiple cards in parallel"""
     
     def __init__(self, max_concurrent: int = 5):
         self.max_concurrent = max_concurrent
-        self.card_generator = CardGeneratorAgent()
-    
+        # Instantiate CardGeneratorAgent with the card-specific client and deployment
+        # Ensure card_client and CARD_DEPLOYMENT are accessible here or passed in
+        if card_client and CARD_DEPLOYMENT:
+             self.card_generator = CardGeneratorAgent(client=card_client, deployment=CARD_DEPLOYMENT)
+        else:
+             logging.error("CardGeneratorAgent could not be initialized in ParallelCardGeneratorManager due to missing client/deployment.")
+             # Handle this error state appropriately - maybe raise an exception?
+             self.card_generator = None # Or provide a dummy agent
+
     async def generate_cards_for_section(
         self,
         keywords: List[str],
         section_title: str,
-        course_title: str
+        course_title: str,
+        difficulty: str # Add difficulty
     ) -> List[CardCreate]:
-        """Generate multiple cards in parallel for a section"""
-        semaphore = asyncio.Semaphore(self.max_concurrent)
-        
-        async def _generate_with_semaphore(keyword: str) -> CardCreate:
-            async with semaphore:
-                return await self.card_generator.generate_card(
-                    keyword=keyword,
-                    section_title=section_title,
-                    course_title=course_title
-                )
-        
-        tasks = [_generate_with_semaphore(keyword) for keyword in keywords]
-        return await asyncio.gather(*tasks)
+        """Generate multiple cards in parallel for a section using keywords"""
+        if not self.card_generator:
+             logging.error("Card generator not available in ParallelCardGeneratorManager.")
+             return []
 
-# Legacy function wrappers for backward compatibility
-async def generate_learning_path(
-    self,
-    interests: List[str],
-    difficulty_level: str = "intermediate",
-    estimated_days: int = 30
-) -> Dict[str, Any]:
-    """Generate a complete learning path with courses and sections"""
-    try:
-        # Generate cache key
-        cache_params = {
-            "interests": interests,
-            "difficulty_level": difficulty_level,
-            "estimated_days": estimated_days,
-            "version": "1.0"  # Add a version to invalidate cache when you update the prompt
-        }
-        cache_key = generate_cache_key(cache_params)
-        
-        # Define the creator function
-        async def create_learning_path():
-            interests_str = ", ".join(interests)
-            prompt = f"""
-            Create a complete structured learning path for someone interested in {interests_str}.
-            The learning path should be at {difficulty_level} level and designed to be completed in approximately {estimated_days} days.
-            
-            # ... rest of your prompt ...
-            """
-            
-            response = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are an expert curriculum designer who creates detailed learning paths."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=3000,
-                model=deployment
-            )
-            
-            content = response.choices[0].message.content.strip()
-            return self._extract_json_from_response(content)
-        
-        # Get from cache or create
-        data, is_cached = await get_or_create_cached_data(cache_key, create_learning_path)
-        
-        if is_cached:
-            logging.info(f"Retrieved learning path from cache for interests: {interests}")
-        else:
-            logging.info(f"Generated new learning path for interests: {interests}")
-        
-        return data
-        
-    except Exception as e:
-        logging.error(f"Error in learning path planner agent: {e}")
-        raise
-    
-async def generate_card_with_ai(
-    keyword: str,
-    context: Optional[str] = None
-) -> CardCreate:
-    """Legacy wrapper for backwards compatibility"""
-    generator = CardGeneratorAgent()
-    return await generator.generate_card(keyword=keyword, context=context)
+        semaphore = asyncio.Semaphore(self.max_concurrent)
+
+        async def _generate_with_semaphore(keyword: str) -> Optional[CardCreate]:
+            async with semaphore:
+                try:
+                    # Use the generate_card method (which now accepts difficulty)
+                    return await self.card_generator.generate_card(
+                        keyword=keyword,
+                        section_title=section_title,
+                        course_title=course_title,
+                        difficulty=difficulty # Pass difficulty
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to generate card for keyword '{keyword}' in parallel: {e}", exc_info=True)
+                    return None # Return None on failure for this specific card
+
+        tasks = [_generate_with_semaphore(keyword) for keyword in keywords]
+        results = await asyncio.gather(*tasks)
+        # Filter out None results (failures)
+        successful_cards = [card for card in results if card is not None]
+        logging.info(f"Successfully generated {len(successful_cards)} out of {len(keywords)} cards in parallel for section '{section_title}'.")
+        return successful_cards
+
+
+# --- Legacy function wrappers ---
+# Consider refactoring code that uses these to instantiate agents directly
+# or use a dependency injection framework.
+
+# Global agent instances with improved error handling
+learning_path_agent = None
+card_agent = None
+
+# Initialize the agents if possible
+try:
+    if general_client and GENERAL_DEPLOYMENT:
+        learning_path_agent = LearningPathPlannerAgent(
+            client=general_client, 
+            deployment=GENERAL_DEPLOYMENT
+        )
+        logging.info("Successfully initialized global LearningPathPlannerAgent")
+    else:
+        logging.warning("Could not initialize global LearningPathPlannerAgent: missing client or deployment")
+except Exception as e:
+    logging.error(f"Error initializing global LearningPathPlannerAgent: {e}")
+
+try:
+    if card_client and CARD_DEPLOYMENT:
+        card_agent = CardGeneratorAgent(client=card_client, deployment=CARD_DEPLOYMENT)
+        logging.info("Successfully initialized global CardGeneratorAgent")
+    else:
+        logging.warning("Could not initialize global CardGeneratorAgent: missing client or deployment")
+except Exception as e:
+    logging.error(f"Error initializing global CardGeneratorAgent: {e}")
+
 
 async def generate_learning_path_with_ai(
     interests: List[str],
     difficulty_level: str = "intermediate",
     estimated_days: int = 30
 ) -> Dict[str, Any]:
-    """Legacy wrapper function for backward compatibility"""
-    agent = LearningPathPlannerAgent()
-    return await agent.generate_learning_path(
+    """Legacy wrapper for backwards compatibility"""
+    if not learning_path_agent:
+        raise RuntimeError("LearningPathPlannerAgent not initialized. Check Azure OpenAI configuration.")
+    # The original implementation here seemed to duplicate the agent logic.
+    # Now it correctly calls the agent method.
+    return await learning_path_agent.generate_learning_path(
         interests=interests,
         difficulty_level=difficulty_level,
         estimated_days=estimated_days
     )
+
+async def generate_card_with_ai(
+    keyword: str,
+    context: Optional[str] = None,
+    section_title: Optional[str] = None, # Add missing params
+    course_title: Optional[str] = None,  # Add missing params
+    difficulty: str = "intermediate"     # Add missing params
+) -> CardCreate:
+    """Legacy wrapper for backwards compatibility"""
+    if not card_agent:
+         raise RuntimeError("CardGeneratorAgent not initialized. Check Azure OpenAI configuration.")
+    # Call the updated agent method
+    return await card_agent.generate_card(
+        keyword=keyword,
+        context=context,
+        section_title=section_title,
+        course_title=course_title,
+        difficulty=difficulty
+        )
+
+# --- Helper function (if needed elsewhere) ---
+def get_card_generator_agent() -> CardGeneratorAgent:
+     if not card_agent:
+         raise RuntimeError("CardGeneratorAgent not initialized. Check Azure OpenAI configuration.")
+     return card_agent
+
+def get_learning_path_planner_agent() -> LearningPathPlannerAgent:
+    if not learning_path_agent:
+        raise RuntimeError("LearningPathPlannerAgent not initialized. Check Azure OpenAI configuration.")
+    return learning_path_agent
 
 async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
     """Extract learning goals from a chat prompt"""
@@ -509,4 +821,19 @@ async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
         # Fallback or re-raise depending on desired behavior
         # For now, raise a specific error the endpoint can catch
         raise ValueError(f"Failed to parse learning goals from prompt: {prompt}")
+    
+
+def create_agent(agent_class, client, deployment):
+    """Helper function to safely create an agent instance"""
+    if client is None or deployment is None:
+        logging.error(f"Cannot create {agent_class.__name__}: client={client}, deployment={deployment}")
+        raise ValueError(f"Cannot create {agent_class.__name__}: Missing client or deployment")
+    return agent_class(client=client, deployment=deployment)
+
+# Then use this helper function when creating agents
+try:
+    agent = create_agent(CardGeneratorAgent, general_client, GENERAL_DEPLOYMENT)
+except ValueError as e:
+    logging.error(f"Agent creation failed: {e}")
+    # Handle the error appropriately
     

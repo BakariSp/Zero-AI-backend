@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 import logging
-from app.services.ai_generator import LearningPathPlannerAgent
+from app.services.ai_generator import LearningPathPlannerAgent, general_client, GENERAL_DEPLOYMENT
 
 class LearningPathDetailService:
     """
@@ -8,7 +8,20 @@ class LearningPathDetailService:
     """
 
     def __init__(self):
-        self.agent = LearningPathPlannerAgent()
+        try:
+            # Create our own instance with proper initialization
+            if general_client and GENERAL_DEPLOYMENT:
+                self.agent = LearningPathPlannerAgent(
+                    client=general_client, 
+                    deployment=GENERAL_DEPLOYMENT
+                )
+                logging.info("Successfully initialized LearningPathDetailService")
+            else:
+                logging.error("Missing client or deployment for LearningPathPlannerAgent")
+                self.agent = None
+        except Exception as e:
+            logging.error(f"Failed to initialize LearningPathDetailService: {e}")
+            self.agent = None
 
     async def generate_from_outline(
         self,
@@ -20,6 +33,10 @@ class LearningPathDetailService:
         Generate detailed course and section structure from a list of outline titles.
         """
         try:
+            # Check if agent is properly initialized
+            if not self.agent:
+                raise RuntimeError("LearningPathPlannerAgent not initialized. Check Azure OpenAI configuration.")
+                
             titles_str = "\n".join(f"{i+1}. {title}" for i, title in enumerate(titles))
 
             prompt = f"""
@@ -55,31 +72,22 @@ class LearningPathDetailService:
               ...
             ]
             """
-
-            # 调用 ChatCompletion 模型
-            response = self.agent.client.chat.completions.create(
-                model=self.agent.deployment,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert curriculum designer."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=3000
+            
+            # Use the agent to generate the detailed structure
+            # Call the newly added method in the agent
+            courses_list = await self.agent.generate_courses_from_titles(
+                titles=titles,
+                difficulty_level=difficulty_level,
+                estimated_days=estimated_days
             )
 
-            content = response.choices[0].message.content.strip()
-            data = self.agent._extract_json_from_response(content)
+            # The agent now returns a list of courses directly.
+            # Wrap it in the expected dictionary format if needed by the caller.
+            # Based on the route `generate_sections_from_titles`, it expects {"courses": [...]}
+            result = {"courses": courses_list}
 
-            return {
-                "courses": data
-            }
-
+            return result
+            
         except Exception as e:
-            logging.error(f"Error in generate_from_outline: {e}")
+            logging.error(f"Error generating detailed learning path: {e}")
             raise

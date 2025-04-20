@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import BackgroundTasks
 import logging
 from pydantic import BaseModel
@@ -14,14 +14,12 @@ from app.models import (
     course_section_association,  # Add this import
     CourseSection
 )
-from app.recommendation.schemas import LearningPathResponse, CourseResponse, CardResponse, RecommendationResponse, LearningPathRequest, ChatPromptRequest
+from app.recommendation.schemas import LearningPathResponse, CourseResponse, CardResponse, RecommendationResponse, LearningPathRequest, ChatPromptRequest, LearningPathStructureRequest, TaskCreationResponse, EnhancedTaskStatus
 from app.recommendation.crud import get_recommended_learning_paths, get_recommended_courses, get_recommended_cards
 from app.services.learning_path_planner import LearningPathPlannerService
 from app.auth.jwt import get_current_active_user
 from app.learning_paths.crud import assign_learning_path_to_user
-from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation
-from app.services.ai_generator import extract_learning_goals
-from app.recommendation.schemas import TaskCreationResponse
+from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation, schedule_structured_learning_path_generation, get_task_status
 
 router = APIRouter()
 
@@ -202,27 +200,37 @@ async def generate_and_save_learning_path(
         "message": "Learning path created. Cards are being generated in the background."
     }
 
-# 添加任务状态查询端点
-@router.get("/tasks/{task_id}", response_model=Dict[str, Any])
-async def get_task_status(
+@router.get("/tasks/{task_id}/status", response_model=EnhancedTaskStatus)
+async def get_task_status_endpoint(
     task_id: str,
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    Get the status of a background task
+    Get the status of a background task.
     """
-    from app.services.background_tasks import get_task_status
-    
-    # 验证任务ID格式并确保属于当前用户
-    parts = task_id.split("_")
-    if len(parts) >= 3 and parts[2].isdigit() and int(parts[2]) == current_user.id:
-        status = get_task_status(task_id)
-        return status
-    
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Task not found"
-    )
+    status_info = get_task_status(task_id)
+    if not status_info:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Add a check and potentially defaults before Pydantic validation
+    if "task_id" not in status_info:
+        logging.error(f"Task {task_id} status info is missing 'task_id'. Data: {status_info}")
+        status_info["task_id"] = task_id # Add it back if missing
+    if "created_at" not in status_info:
+         logging.warning(f"Task {task_id} status info is missing 'created_at'. Setting to default.")
+         # Add a sensible default, perhaps from DB if available, or current time
+         status_info["created_at"] = datetime.now(timezone.utc)
+    if "updated_at" not in status_info:
+         logging.warning(f"Task {task_id} status info is missing 'updated_at'. Setting to default.")
+         status_info["updated_at"] = datetime.now(timezone.utc) # Or use created_at
+
+    try:
+        # Now validate with Pydantic
+        return EnhancedTaskStatus(**status_info)
+    except ValidationError as e:
+        logging.error(f"Error validating task status for {task_id}: {e} - Data: {status_info}")
+        # Return a generic error or a simplified status
+        raise HTTPException(status_code=500, detail=f"Internal server error validating task status: {e}")
 
 @router.post("/learning-paths/{learning_path_id}/generate-cards", response_model=Dict[str, Any])
 async def generate_cards_for_learning_path(
@@ -335,6 +343,7 @@ async def generate_cards_for_learning_path(
 async def generate_learning_path_from_chat(
     request_body: ChatPromptRequest,
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
@@ -349,6 +358,7 @@ async def generate_learning_path_from_chat(
         # Schedule the comprehensive background task
         task_id = schedule_full_learning_path_generation(
             background_tasks=background_tasks,
+            db=db,
             prompt=prompt,
             user_id=current_user.id
         )
@@ -360,9 +370,43 @@ async def generate_learning_path_from_chat(
         )
 
     except Exception as e:
-        # Catch potential errors during scheduling itself (less likely)
-        logging.error(f"Error scheduling learning path generation from chat: {e}")
+        # Log the specific error that occurred during scheduling
+        logging.error(f"Error scheduling learning path generation from chat: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to schedule learning path generation."
+        )
+
+@router.post("/learning-paths/create-from-structure", response_model=TaskCreationResponse)
+async def create_learning_path_from_structure(
+    request: LearningPathStructureRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Creates a learning path, courses, and sections from a predefined structure,
+    assigns it to the user, and schedules background card generation (4 cards per section).
+    """
+    try:
+        # Schedule the entire process (structure saving + card generation)
+        task_id = schedule_structured_learning_path_generation(
+            background_tasks=background_tasks,
+            db=db,
+            user_id=current_user.id,
+            structure_request=request
+        )
+
+        return TaskCreationResponse(
+            task_id=task_id,
+            message="Learning path creation and card generation initiated. Track progress using the task ID."
+        )
+    except HTTPException as http_exc:
+        # Re-raise HTTPExceptions (like the one from failed task creation)
+        raise http_exc
+    except Exception as e:
+        logging.error(f"Failed to schedule learning path creation from structure: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to initiate learning path creation."
         )

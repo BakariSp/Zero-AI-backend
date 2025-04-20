@@ -4,6 +4,8 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 from sqlalchemy.sql import func
 from app.db import Base
+from sqlalchemy.ext.mutable import MutableList
+from sqlalchemy import event
 
 # Define your models here
 class User(Base):
@@ -40,7 +42,9 @@ class User(Base):
     courses = relationship("UserCourse", back_populates="user")
     custom_sections = relationship("UserSection", back_populates="user")
 
-# User-Card association table for saved cards
+# --- Define Association Tables FIRST ---
+
+# User-Card association table
 user_cards = Table(
     'user_cards',
     Base.metadata,
@@ -63,6 +67,45 @@ user_achievements = Table(
     Column('achievement_id', Integer, ForeignKey('achievements.id'), primary_key=True),
     Column('achieved_at', DateTime, default=func.now())
 )
+
+# Association table for courses and sections
+course_section_association = Table(
+    'course_section_association',
+    Base.metadata,
+    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True),
+    Column('section_id', Integer, ForeignKey('course_sections.id'), primary_key=True),
+    Column('order_index', Integer, nullable=False)
+)
+
+# Association table for learning paths and courses
+learning_path_courses = Table(
+    'learning_path_courses',
+    Base.metadata,
+    Column('learning_path_id', Integer, ForeignKey('learning_paths.id'), primary_key=True),
+    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True),
+    Column('order_index', Integer, nullable=False)
+)
+
+# Section-Card association table
+section_cards = Table(
+    'section_cards',
+    Base.metadata,
+    Column('section_id', Integer, ForeignKey('course_sections.id'), primary_key=True),
+    Column('card_id', Integer, ForeignKey('cards.id'), primary_key=True),
+    Column('order_index', Integer, nullable=False)
+)
+
+# User-Section-Card association table
+user_section_cards = Table(
+    'user_section_cards',
+    Base.metadata,
+    Column('user_section_id', Integer, ForeignKey('user_sections.id'), primary_key=True),
+    Column('card_id', Integer, ForeignKey('cards.id'), primary_key=True),
+    Column('order_index', Integer, nullable=False),
+    Column('is_custom', Boolean, default=False)  # 用户自己加的
+)
+
+# --- Define Main Models AFTER Association Tables ---
 
 class LearningPath(Base):
     __tablename__ = "learning_paths"
@@ -97,26 +140,39 @@ class CourseSection(Base):
 
     # Relationships
     learning_path = relationship("LearningPath", back_populates="sections")
-    cards = relationship("Card", secondary="section_cards", back_populates="sections")
+    cards = relationship("Card", secondary="section_cards", back_populates="sections", order_by=section_cards.c.order_index)
     courses = relationship("Course", secondary="course_section_association", back_populates="sections")
 
 class Card(Base):
     __tablename__ = "cards"
 
     id = Column(Integer, primary_key=True, index=True)
-    keyword = Column(String(255), index=True)
+    keyword = Column(String(255), index=True, nullable=False)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
     explanation = Column(Text, nullable=True)
-    resources = Column(JSON, nullable=True)
+    difficulty = Column(String(50), nullable=True)
+    resources = Column(MutableList.as_mutable(JSON), default=lambda: [])  # Use lambda to ensure a new list each time
     level = Column(String(20), nullable=True)
     tags = Column(JSON, nullable=True)
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     
-    # 修改关系定义
+    # Relationships
     sections = relationship("CourseSection", secondary="section_cards", back_populates="cards")
     saved_by_users = relationship("User", secondary="user_cards", back_populates="saved_cards")
     user_sections = relationship("UserSection", secondary="user_section_cards", back_populates="cards")
+    
+    # Add a property to handle None values for resources
+    @property
+    def safe_resources(self):
+        return self.resources if self.resources is not None else []
+
+@event.listens_for(Card, 'load')
+def receive_load(target, context):
+    if target.resources is None:
+        target.resources = []
 
 class UserLearningPath(Base):
     __tablename__ = "user_learning_paths"
@@ -180,24 +236,6 @@ class Course(Base):
     learning_paths = relationship("LearningPath", secondary="learning_path_courses", back_populates="courses")
     user_courses = relationship("UserCourse", back_populates="course")
 
-# Association table for courses and sections - renamed to avoid conflict
-course_section_association = Table(
-    'course_section_association',
-    Base.metadata,
-    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True),
-    Column('section_id', Integer, ForeignKey('course_sections.id'), primary_key=True),
-    Column('order_index', Integer, nullable=False)
-)
-
-# Association table for learning paths and courses
-learning_path_courses = Table(
-    'learning_path_courses',
-    Base.metadata,
-    Column('learning_path_id', Integer, ForeignKey('learning_paths.id'), primary_key=True),
-    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True),
-    Column('order_index', Integer, nullable=False)
-)
-
 # User course progress tracking
 class UserCourse(Base):
     __tablename__ = "user_courses"
@@ -214,15 +252,6 @@ class UserCourse(Base):
     # Relationships
     user = relationship("User", back_populates="courses")
     course = relationship("Course", back_populates="user_courses")
-
-# Section-Card association table
-section_cards = Table(
-    'section_cards',
-    Base.metadata,
-    Column('section_id', Integer, ForeignKey('course_sections.id'), primary_key=True),
-    Column('card_id', Integer, ForeignKey('cards.id'), primary_key=True),
-    Column('order_index', Integer, nullable=False)
-)
 
 # 在现有模型之后添加
 
@@ -241,13 +270,3 @@ class UserSection(Base):
     user = relationship("User", back_populates="custom_sections")
     section_template = relationship("CourseSection")
     cards = relationship("Card", secondary="user_section_cards", back_populates="user_sections")
-
-# User-Section-Card association table
-user_section_cards = Table(
-    'user_section_cards',
-    Base.metadata,
-    Column('user_section_id', Integer, ForeignKey('user_sections.id'), primary_key=True),
-    Column('card_id', Integer, ForeignKey('cards.id'), primary_key=True),
-    Column('order_index', Integer, nullable=False),
-    Column('is_custom', Boolean, default=False)  # 用户自己加的
-)

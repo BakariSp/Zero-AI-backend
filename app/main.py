@@ -13,6 +13,7 @@ from app.learning_path_courses.routes import router as learning_path_courses_rou
 from app.recommendation.routes import router as recommendation_router
 from app.auth.oauth import router as oauth_router
 from app.courses.routes import router as courses_router
+from app.tasks.routes import router as tasks_router
 
 app = FastAPI(
     title="AI Learning Guide API",
@@ -47,6 +48,8 @@ app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_
 app.include_router(recommendation_router, prefix="/api", tags=["recommendations"])
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(courses_router, prefix="/api", tags=["courses"])
+app.include_router(tasks_router, prefix="/api", tags=["tasks"])
+
 @app.get("/")
 def read_root():
     return {

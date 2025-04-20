@@ -25,7 +25,8 @@ from app.learning_paths.crud import (
     get_user_learning_paths,
     get_user_learning_path,
     assign_learning_path_to_user,
-    update_user_learning_path_progress
+    update_user_learning_path_progress,
+    get_user_learning_path_by_ids
 )
 from app.services.ai_generator import generate_learning_path_with_ai
 from app.services.learning_outline_service import LearningPathOutlineService
@@ -306,3 +307,60 @@ async def generate_sections_from_titles(request: GenerateDetailsFromOutlineReque
     except Exception as e:
         logging.error(f"Failed to generate sections: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate sections")
+
+@router.delete("/users/me/learning-paths/{path_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_my_learning_path(
+    path_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Delete a learning path assigned to the current user.
+    This will also delete associated courses, sections, and cards
+    if database cascading is configured.
+    """
+    # 1. Check if the user is actually assigned to this learning path
+    user_path_assignment = get_user_learning_path_by_ids(
+        db=db, user_id=current_user.id, learning_path_id=path_id
+    )
+
+    if not user_path_assignment:
+        # If the user is not assigned, they cannot delete it.
+        # Return 404 to avoid revealing if the path exists but belongs to someone else.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Learning path assignment not found for this user."
+        )
+
+    # 2. If assigned, proceed with deletion using the existing function
+    #    (which relies on DB cascades or needs enhancement)
+    try:
+        deleted = delete_learning_path(db=db, path_id=path_id)
+        if not deleted: # Should not happen if assignment check passed, but good practice
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Learning path not found during deletion attempt."
+            )
+        # No explicit return body needed for 204 No Content
+        return
+
+    except HTTPException as e:
+        # Re-raise specific HTTP exceptions (like 404 from delete_learning_path)
+        raise e
+    except Exception as e:
+        # Catch potential errors during deletion
+        logging.error(f"Error deleting learning path {path_id} for user {current_user.id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while deleting the learning path."
+        )
+
+# --- Helper function needed in app/learning_paths/crud.py ---
+# You might need to add this function if it doesn't exist
+
+def get_user_learning_path_by_ids(db: Session, user_id: int, learning_path_id: int) -> Optional[UserLearningPath]:
+    """Retrieve a specific UserLearningPath assignment."""
+    return db.query(UserLearningPath).filter(
+        UserLearningPath.user_id == user_id,
+        UserLearningPath.learning_path_id == learning_path_id
+    ).first()

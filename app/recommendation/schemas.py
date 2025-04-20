@@ -131,3 +131,42 @@ class CardGenerationStatus(BaseModel):
 class TaskCreationResponse(BaseModel):
     task_id: str
     message: str
+
+class SectionStructureInput(BaseModel):
+    # id: str # Optional: Frontend ID if needed for mapping later
+    title: str
+
+class CourseStructureInput(BaseModel):
+    # id: str # Optional: Frontend ID if needed for mapping later
+    title: str
+    sections: List[SectionStructureInput]
+
+class LearningPathStructureRequest(BaseModel):
+    prompt: Optional[str] = None # Original user prompt, if available
+    title: str = Field(..., description="The overall title for the learning path")
+    courses: List[CourseStructureInput]
+    difficulty_level: str = "intermediate"
+    estimated_days: Optional[int] = None # Optional: Add if frontend provides it
+
+# Add a schema for the enhanced task status (optional but good practice)
+class SectionGenerationStatus(BaseModel):
+    status: str = "pending" # pending, generating, completed, failed
+    cards_generated: int = 0
+    error: Optional[str] = None
+
+class EnhancedTaskStatus(BaseModel):
+    task_id: str
+    status: str # pending, running, completed, failed, timeout
+    stage: str # e.g., saving_structure, generating_cards, finished
+    progress: int # Overall progress percentage (0-100)
+    message: Optional[str] = None
+    learning_path_id: Optional[int] = None
+    total_sections: Optional[int] = None
+    sections_completed: Optional[int] = None
+    total_cards_expected: Optional[int] = None # Expected total cards (sections * 4)
+    cards_completed: Optional[int] = 0
+    section_status: Optional[Dict[int, SectionGenerationStatus]] = None # Section-level status
+    errors: List[str] = []
+    error_details: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime

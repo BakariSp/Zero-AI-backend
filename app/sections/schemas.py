@@ -1,23 +1,8 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
+from app.cards.schemas import CardResponse, CardBase, Resource
 
-# 基础卡片模式
-class CardBase(BaseModel):
-    keyword: str
-    explanation: Optional[str] = None
-    resources: Optional[Dict[str, Any]] = None
-    level: Optional[str] = None
-    tags: Optional[List[str]] = None
-
-class CardResponse(CardBase):
-    id: int
-    created_by: Optional[str] = None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
 
 # 章节中的卡片
 class CardInSection(BaseModel):
@@ -39,6 +24,17 @@ class CardInSectionUpdate(BaseModel):
 class SectionBase(BaseModel):
     title: str
     description: Optional[str] = None
+    order_index: int
+
+class SectionCreate(SectionBase):
+    pass # Inherits fields from SectionBase
+
+class Section(SectionBase):
+    id: int
+    course_id: int # Assuming a section belongs to a course
+
+    class Config:
+        orm_mode = True # or from_attributes = True for Pydantic v2
 
 # 系统模板章节响应
 class SectionCardResponse(BaseModel):
@@ -53,7 +49,10 @@ class SectionResponse(BaseModel):
     title: str
     description: Optional[str] = None
     order_index: int
-    card_associations: List[SectionCardResponse] = []
+    cards: List[CardResponse] = []
+    learning_path_id: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

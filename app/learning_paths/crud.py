@@ -2,9 +2,10 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 
-from app.models import LearningPath, CourseSection, UserLearningPath, User
+from app.models import LearningPath, CourseSection, UserLearningPath, User, Course
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
+
 def get_learning_path(db: Session, path_id: int) -> Optional[LearningPath]:
     return db.query(LearningPath).filter(LearningPath.id == path_id).first()
 
@@ -77,12 +78,17 @@ def delete_learning_path(db: Session, path_id: int) -> bool:
 def get_user_learning_paths(db: Session, user_id: int) -> List[UserLearningPath]:
     user_paths = (
         db.query(UserLearningPath)
-        .options(joinedload(UserLearningPath.learning_path))
+        .options(
+            selectinload(UserLearningPath.learning_path)
+            .selectinload(LearningPath.courses)
+            .selectinload(Course.sections)
+            .selectinload(CourseSection.cards)
+        )
         .filter(UserLearningPath.user_id == user_id)
         .all()
     )
 
-    return [path for path in user_paths if path.learning_path and path.learning_path_id]
+    return [path for path in user_paths if path.learning_path]
 
 def get_user_learning_path(db: Session, user_id: int, path_id: int) -> Optional[UserLearningPath]:
     return db.query(UserLearningPath).filter(
@@ -127,4 +133,11 @@ def update_user_learning_path_progress(
     db_user_path.progress = progress
     db.commit()
     db.refresh(db_user_path)
-    return db_user_path 
+    return db_user_path
+
+def get_user_learning_path_by_ids(db: Session, user_id: int, learning_path_id: int) -> Optional[UserLearningPath]:
+    """Retrieve a specific UserLearningPath assignment."""
+    return db.query(UserLearningPath).filter(
+        UserLearningPath.user_id == user_id,
+        UserLearningPath.learning_path_id == learning_path_id
+    ).first() 

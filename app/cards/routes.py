@@ -28,7 +28,10 @@ from app.cards.crud import (
     update_user_card,
     remove_card_from_user
 )
-from app.services.ai_generator import generate_card_with_ai
+from app.services.ai_generator import (
+    generate_card_with_ai,
+    get_card_generator_agent
+)
 
 router = APIRouter()
 
@@ -200,32 +203,66 @@ async def generate_ai_card(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Generate a card using AI based on a keyword"""
+    """Generate a card using AI based on a keyword, potentially linking to a section."""
     try:
         # Check if card with this keyword already exists
-        existing_card = get_card_by_keyword(db, request.keyword)
-        if existing_card:
-            # If card exists and belongs to the requested section, return it
-            if request.section_id is None or existing_card.section_id == request.section_id:
-                return existing_card
-        
-        # Generate card with AI
-        card_data = await generate_card_with_ai(
-            keyword=request.keyword,
-            context=request.context
+        # Note: create_card in crud.py now handles checking existence and linking
+        # existing_card = get_card_by_keyword(db, request.keyword)
+        # if existing_card:
+        #     logging.info(f"Card with keyword '{request.keyword}' already exists (ID: {existing_card.id}). Will link if section provided.")
+            # The create_card function will handle returning the existing card
+            # and linking it to the section if necessary.
+
+        # --- Option 1: Use legacy wrapper (if updated correctly) ---
+        # card_data: CardCreate = await generate_card_with_ai(
+        #     keyword=request.keyword,
+        #     context=request.context,
+        #     # Pass section/course/difficulty if available in request or defaults
+        #     section_title=None, # Example: Get from request if needed
+        #     course_title=None,  # Example: Get from request if needed
+        #     difficulty="intermediate" # Example: Get from request or default
+        # )
+
+        # --- Option 2: Get agent instance and call method (Preferred) ---
+        try:
+            card_generator = get_card_generator_agent()
+        except RuntimeError as e:
+             raise HTTPException(status_code=503, detail=f"AI Service Unavailable: {e}")
+
+        card_data: CardCreate = await card_generator.generate_card(
+             keyword=request.keyword,
+             context=request.context,
+             # Pass section/course/difficulty if available in request or defaults
+             section_title=None, # Example: Get from request if needed
+             course_title=None,  # Example: Get from request if needed
+             difficulty="intermediate" # Example: Get from request or default
         )
-        
-        # Add section_id if provided
-        if request.section_id:
-            card_data.section_id = request.section_id
-        
-        # Create the card in the database
-        card = create_card(db=db, card_data=card_data)
-        
-        return card
-    
+        # --- End Option 2 ---
+
+
+        # Create the card in the database, passing section_id for linking
+        # The crud function handles checking for duplicates and linking
+        card = create_card(db=db, card_data=card_data, section_id=request.section_id)
+
+        # Return using CardResponse schema
+        return CardResponse.from_orm(card) # Use from_orm for Pydantic v2+
+
+    except ValueError as ve:
+         # Catch specific errors like JSON parsing or missing fields from AI
+         logging.error(f"Value error during AI card generation: {ve}", exc_info=True)
+         raise HTTPException(
+             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, # 422 or 500 depending on context
+             detail=f"Failed to process AI response: {str(ve)}"
+         )
+    except RuntimeError as rte:
+         # Catch agent initialization errors
+         logging.error(f"Runtime error during AI card generation: {rte}", exc_info=True)
+         raise HTTPException(
+             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+             detail=f"AI Service Unavailable: {str(rte)}"
+         )
     except Exception as e:
-        logging.error(f"Error generating card: {e}")
+        logging.error(f"Unexpected error generating card: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate card: {str(e)}"
