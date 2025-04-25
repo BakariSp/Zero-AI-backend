@@ -41,7 +41,7 @@ oauth.register(
 @router.get("/google")
 async def login_via_google(request: Request):
     """Initiate Google OAuth login flow"""
-    redirect_uri = request.url_for('auth_via_google')
+    redirect_uri = str(request.url_for('auth_via_google'))
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 @router.get("/google/callback", name="auth_via_google")
@@ -61,7 +61,7 @@ async def auth_via_google(request: Request):
 @router.get("/microsoft")
 async def login_via_microsoft(request: Request):
     """Initiate Microsoft OAuth login flow"""
-    redirect_uri = request.url_for('auth_via_microsoft')
+    redirect_uri = str(request.url_for('auth_via_microsoft'))
     return await oauth.microsoft.authorize_redirect(request, redirect_uri)
 
 @router.get("/microsoft/callback", name="auth_via_microsoft")

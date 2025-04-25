@@ -24,6 +24,7 @@ from app.recommendation.routes import router as recommendation_router
 from sqlalchemy import text
 from app.auth.oauth import router as oauth_router
 from app.tasks.routes import router as tasks_router
+from app.planner.ai import router as planner_router
 # Load environment variables from .env file
 load_dotenv()
 print("Environment variables loaded:")
@@ -69,6 +70,7 @@ app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_
 app.include_router(recommendation_router, prefix="/api", tags=["recommendations"])
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(tasks_router, prefix="/api", tags=["tasks"])
+app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
 # Initialize database on startup
 @app.on_event("startup")
 def startup_db_client():

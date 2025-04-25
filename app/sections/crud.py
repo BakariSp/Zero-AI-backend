@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from app.models import CourseSection, UserSection, Card, section_cards, user_section_cards
-from app.sections.schemas import UserSectionCreate, UserSectionUpdate
+from app.sections.schemas import UserSectionCreate, UserSectionUpdate, SectionCreate
 from typing import List, Optional, Dict, Any
 
 # 获取系统模板章节列表
@@ -194,23 +194,23 @@ def add_card_to_section(db: Session, section_id: int, card_id: int, order_index:
     
     return None
 
-def create_section(db: Session, section_data: Dict[str, Any]) -> CourseSection:
+def create_section(db: Session, section_data: SectionCreate) -> CourseSection:
     """
     Create a new course section
     
     Args:
         db: Database session
-        section_data: Dictionary containing section data (title, description, etc.)
+        section_data: Pydantic model containing section data
         
     Returns:
         The created CourseSection object
     """
-    # Create section object from data
+    # Create section object from Pydantic model attributes
     db_section = CourseSection(
-        title=section_data.get("title"),
-        description=section_data.get("description"),
-        order_index=section_data.get("order_index", 0),
-        estimated_days=section_data.get("estimated_days"),
+        title=section_data.title,
+        description=section_data.description,
+        order_index=section_data.order_index if section_data.order_index is not None else 0,
+        # estimated_days=section_data.estimated_days,
         is_template=True
     )
     
