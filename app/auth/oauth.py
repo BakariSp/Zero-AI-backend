@@ -22,8 +22,8 @@ oauth = OAuth(config)
 # Configure Microsoft OAuth
 oauth.register(
     name="microsoft",
-    client_id=os.getenv("MICROSOFT_CLIENT_ID", ""),
-    client_secret=os.getenv("MICROSOFT_CLIENT_SECRET", ""),
+    client_id=config.get("MICROSOFT_CLIENT_ID", default=""),
+    client_secret=config.get("MICROSOFT_CLIENT_SECRET", default=""),
     server_metadata_url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
@@ -31,8 +31,8 @@ oauth.register(
 # Configure Google OAuth
 oauth.register(
     name="google",
-    client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+    client_id=config.get("GOOGLE_CLIENT_ID", default=""),
+    client_secret=config.get("GOOGLE_CLIENT_SECRET", default=""),
     server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
@@ -41,6 +41,12 @@ oauth.register(
 @router.get("/google")
 async def login_via_google(request: Request):
     """Initiate Google OAuth login flow"""
+    # --- DEBUGGING (Keep for now, but might be redundant if this works) ---
+    client_id = os.getenv("GOOGLE_CLIENT_ID") # This os.getenv might still read correctly now
+    config_client_id = config.get("GOOGLE_CLIENT_ID") # Let's also check the config object here
+    print(f"--- DEBUG: os.getenv client_id: '{client_id}' ---") 
+    print(f"--- DEBUG: config.get client_id: '{config_client_id}' ---")
+    # --- END DEBUGGING ---
     redirect_uri = str(request.url_for('auth_via_google'))
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
