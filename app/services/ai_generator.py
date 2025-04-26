@@ -425,10 +425,8 @@ class CardGeneratorAgent(BaseAgent):
                 "question": "A clear question related to the keyword.",
                 "answer": "A concise and accurate answer to the question.",
                 "explanation": "A brief explanation providing more context or detail about the answer.",
-                "difficulty": "{difficulty}" // Should match the target difficulty
-                // Optional fields below (include if relevant and possible):
-                // "resources": [{{ "url": "valid_url", "title": "Resource Title" }}], // List of relevant resource URLs and titles
-                // "tags": ["tag1", "tag2"] // List of relevant keywords or tags
+                "difficulty": "{difficulty}", // Should match the target difficulty
+                "resources": [{{ "url": "valid_url", "title": "Resource Title" }}] // REQUIRED list of relevant resource URLs and titles (can be empty list [] if none found)
             }}
 
             Ensure the output is ONLY the JSON object, starting with {{ and ending with }}. Do not include any introductory text, markdown formatting, or explanations outside the JSON structure.
@@ -513,17 +511,15 @@ class CardGeneratorAgent(BaseAgent):
                 "question": "A clear question related to the keyword.",
                 "answer": "A concise and accurate answer to the question.",
                 "explanation": "A brief explanation providing more context or detail about the answer.",
-                "difficulty": "{difficulty}" // Should match the target difficulty
-                // Optional fields below (include if relevant and possible):
-                // "resources": [{{ "url": "valid_url", "title": "Resource Title" }}], // List of relevant resource URLs and titles
-                // "tags": ["tag1", "tag2"] // List of relevant keywords or tags
+                "difficulty": "{difficulty}", // Should match the target difficulty
+                "resources": [{{ "url": "valid_url", "title": "Resource Title" }}] // REQUIRED list of relevant resource URLs and titles
             }}
 
             Example structure for the final output:
             {{
                 "cards": [
-                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}" }},
-                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}" }}
+                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}", "resources": [{{"url": "...", "title": "..."}}] }}, 
+                    {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}", "resources": [{{"url": "...", "title": "..."}}] }} 
                     // ... (total of {num_cards} card objects)
                 ]
             }}

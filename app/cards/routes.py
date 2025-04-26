@@ -232,10 +232,10 @@ async def generate_ai_card(
         card_data: CardCreate = await card_generator.generate_card(
              keyword=request.keyword,
              context=request.context,
-             # Pass section/course/difficulty if available in request or defaults
-             section_title=None, # Example: Get from request if needed
-             course_title=None,  # Example: Get from request if needed
-             difficulty="intermediate" # Example: Get from request or default
+             # Pass titles and difficulty from the request
+             section_title=request.section_title,
+             course_title=request.course_title,
+             difficulty=request.difficulty or "intermediate" # Use request difficulty or default
         )
         # --- End Option 2 ---
 

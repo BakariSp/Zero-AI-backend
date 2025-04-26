@@ -81,13 +81,13 @@ class CardGeneratorAgent:
             "answer": "A concise and accurate answer to the question.",
             "explanation": "A brief explanation providing more context or detail about the answer.",
             "difficulty": "{difficulty}"
-            // Optional: "resources": [{{ "url": "...", "title": "..." }}], "tags": ["..."]
+            "resources": [{{ "url": "...", "title": "..." }}],
         }}
 
         Example structure for the final output:
         {{
             "cards": [
-                {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}" }},
+                {{ "keyword": "...", "question": "...", "answer": "...", "explanation": "...", "difficulty": "{difficulty}", "resources": [{{ "url": "valid_url", "title": "Resource Title" }}], }},
                 // ... (total of {num_cards} card objects)
             ]
         }}

@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 
 from app.models import LearningPath, CourseSection, UserLearningPath, User, Course
+from app.tasks.models import UserTask
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -71,6 +72,10 @@ def delete_learning_path(db: Session, path_id: int) -> bool:
             detail="Learning path not found"
         )
     
+    # Delete associated UserTasks first to avoid foreign key constraint errors
+    db.query(UserTask).filter(UserTask.learning_path_id == path_id).delete(synchronize_session=False)
+    
+    # Now delete the LearningPath
     db.delete(db_path)
     db.commit()
     return True
@@ -85,6 +90,7 @@ def get_user_learning_paths(db: Session, user_id: int) -> List[UserLearningPath]
             .selectinload(CourseSection.cards)
         )
         .filter(UserLearningPath.user_id == user_id)
+        .order_by(UserLearningPath.created_at.desc())
         .all()
     )
 

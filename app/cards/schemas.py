@@ -82,6 +82,9 @@ class GenerateCardRequest(BaseModel):
     keyword: str
     context: Optional[str] = None
     section_id: Optional[int] = None
+    section_title: Optional[str] = None
+    course_title: Optional[str] = None
+    difficulty: Optional[str] = None
 
 class CardResponseSchema(BaseModel):
     id: int
