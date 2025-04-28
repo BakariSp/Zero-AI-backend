@@ -149,7 +149,7 @@ jobs:
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
         with:
-          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          app-name: 'zero-ai'
           slot-name: 'production'
           package: release.zip
           # Add publish-profile if you are using it
