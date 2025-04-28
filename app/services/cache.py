@@ -123,4 +123,4 @@ async def periodic_cache_cleanup():
         await asyncio.sleep(3600)  # Run every hour
 
 # Start the cleanup task
-asyncio.create_task(periodic_cache_cleanup()) 
+# asyncio.create_task(periodic_cache_cleanup()) 
