@@ -145,21 +145,35 @@ jobs:
               }
             ]
           
-      - name: 'Deploy to Azure Web App'
-        uses: azure/webapps-deploy@v3
+      - name: Deploy to Azure Web App
         id: deploy-to-webapp
+        uses: azure/webapps-deploy@v3
         with:
-          app-name: 'zero-ai'
-          slot-name: 'Production'
+          app-name: ${{ env.AZURE_WEBAPP_NAME }}
+          slot-name: 'production'
           package: release.zip
-          
+          # Add publish-profile if you are using it
+          # publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_YOUR_SECRET }}
+
       - name: Verify deployment
         run: |
           echo "Waiting for deployment to complete..."
           sleep 30
-          response=$(curl -s -o /dev/null -w "%{http_code}" https://zero-ai.azurewebsites.net/api/public-test)
+
+          # Get the base URL from the deployment step output and remove any trailing slash
+          APP_URL=$(echo '${{ steps.deploy-to-webapp.outputs.webapp-url }}' | sed 's|/$||')
+
+          # Construct the full verification URL
+          VERIFY_URL="${APP_URL}/api/public-test"
+
+          echo "Verifying deployment at $VERIFY_URL"
+          response=$(curl -s -o /dev/null -w "%{http_code}" "$VERIFY_URL")
+
           if [ "$response" != "200" ]; then
             echo "Deployment verification failed with status code: $response"
+            # Optional: Add verbose curl output for debugging if it fails
+            echo "Attempting verbose curl request for debugging:"
+            curl -v "$VERIFY_URL"
             exit 1
           fi
           echo "Deployment verified successfully!"
