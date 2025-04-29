@@ -97,8 +97,10 @@ class GenerateCourseTitleRequest(BaseModel):
     estimated_days: int = 30
     existing_items: List[str] = []
 
+class LearningPathBasicInfo(BaseModel):
+    id: int
+    title: Optional[str]
+    description: Optional[str]
 
-class GenerateDetailsFromOutlineRequest(BaseModel):
-    titles: List[str]
-    difficulty_level: str = "beginner"
-    estimated_days: int = 30
+    class Config:
+        orm_mode = True

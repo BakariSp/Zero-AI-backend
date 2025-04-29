@@ -14,7 +14,10 @@ from app.learning_paths.schemas import (
     UserLearningPathCreate,
     UserLearningPathResponse,
     UserLearningPathUpdate,
-    GenerateLearningPathRequest
+    GenerateLearningPathRequest,
+    LearningPathBasicInfo,
+    GenerateDetailsFromOutlineRequest,
+    GenerateCourseTitleRequest
 )
 from app.learning_paths.crud import (
     get_learning_path,
@@ -65,6 +68,18 @@ def read_learning_paths(
 ):
     """Get all learning paths with optional category filter"""
     learning_paths = get_learning_paths(db, skip=skip, limit=limit, category=category)
+    return learning_paths
+
+@router.get("/learning-paths/basic", response_model=List[LearningPathBasicInfo])
+def read_all_learning_paths_basic(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Get a basic list of all learning paths (id, name, description, state).
+    Requires authentication.
+    """
+    learning_paths = get_learning_paths(db=db, limit=1000)
     return learning_paths
 
 @router.get("/learning-paths/{path_id}", response_model=LearningPathResponse)
@@ -140,6 +155,21 @@ def read_user_learning_paths(
 ):
     """Get all learning paths for the current user"""
     return get_user_learning_paths(db=db, user_id=current_user.id)
+
+@router.get("/users/me/learning-paths/basic", response_model=List[LearningPathBasicInfo])
+def read_my_learning_paths_basic(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Get a basic list (id, name, description, state) of learning paths
+    assigned to the current user.
+    """
+    user_path_assignments = get_user_learning_paths(db=db, user_id=current_user.id)
+    # Extract the LearningPath object from each assignment
+    learning_paths = [assignment.learning_path for assignment in user_path_assignments]
+    # Pydantic's response_model handles filtering the fields
+    return learning_paths
 
 @router.post("/users/me/learning-paths", response_model=UserLearningPathResponse)
 def add_learning_path_to_user(
