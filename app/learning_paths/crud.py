@@ -3,7 +3,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 
 from app.models import LearningPath, CourseSection, UserLearningPath, User, Course
-from app.tasks.models import UserTask
+from app.backend_tasks.models import UserTask
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from sqlalchemy.orm import joinedload, selectinload
 

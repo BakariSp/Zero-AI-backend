@@ -1,7 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime
-from .models import TaskStatusEnum, TaskStageEnum # Import the enums
+from .models import TaskStatusEnum, TaskStageEnum
 
 class UserTaskBase(BaseModel):
     task_id: str
@@ -17,7 +17,7 @@ class UserTaskBase(BaseModel):
 
 class UserTaskCreate(UserTaskBase):
     # Fields required for creation
-    pass # Often task_id, user_id, status are enough initially
+    pass
 
 class UserTaskUpdate(BaseModel):
     # Fields allowed for update
@@ -26,7 +26,7 @@ class UserTaskUpdate(BaseModel):
     progress: Optional[float] = None
     message: Optional[str] = None
     error_details: Optional[str] = None
-    learning_path_id: Optional[int] = None # Allow updating LP ID if needed
+    learning_path_id: Optional[int] = None
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
 
@@ -35,5 +35,4 @@ class UserTaskResponse(UserTaskBase):
     updated_at: datetime
 
     class Config:
-        from_attributes = True # Use this for Pydantic v2+
-        # orm_mode = True # Use this for Pydantic v1 
+        from_attributes = True 

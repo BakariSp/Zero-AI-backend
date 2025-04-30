@@ -1,13 +1,10 @@
 import enum
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Enum as DBEnum, Float, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Enum as DBEnum, Float
+from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
 from app.db import Base
-from app.models import User # Assuming your User model is here
-from app.models import LearningPath # Assuming your LearningPath model is here
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
-from sqlalchemy.orm import Mapped, mapped_column
 
 class TaskStatusEnum(str, enum.Enum):
     PENDING = "pending"
@@ -17,8 +14,8 @@ class TaskStatusEnum(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     TIMEOUT = "timeout"
-    CANCELLED = "cancelled" # Added if needed
-    COMPLETED_WITH_ERRORS = "completed_with_errors" # Add this line
+    CANCELLED = "cancelled"
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
 
 class TaskStageEnum(str, enum.Enum):
     INITIALIZING = "initializing"
@@ -28,29 +25,30 @@ class TaskStageEnum(str, enum.Enum):
     SAVING_STRUCTURE = "saving_structure"
     STRUCTURE_SAVED = "structure_saved"
     FINISHED = "finished"
-    QUEUED = "queued" # Added if needed
+    QUEUED = "queued"
 
 class UserTask(Base):
-    __tablename__ = "user_tasks"
+    __tablename__ = "backend_tasks"
+    __table_args__ = {'extend_existing': True}
 
     task_id = Column(String(255), primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     learning_path_id = Column(Integer, ForeignKey("learning_paths.id"), nullable=True, index=True)
 
     status = Column(DBEnum(TaskStatusEnum), nullable=False, default=TaskStatusEnum.PENDING, index=True)
-    stage = Column(DBEnum(TaskStageEnum), nullable=True) # Optional stage tracking
+    stage = Column(DBEnum(TaskStageEnum), nullable=True)
 
-    progress = Column(Float, default=0.0) # Progress percentage
-    message = Column(Text, nullable=True) # User-facing message
-    error_details = Column(Text, nullable=True) # Detailed error/traceback
+    progress = Column(Float, default=0.0)
+    message = Column(Text, nullable=True)
+    error_details = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now()) # Track updates
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
-    started_at = Column(DateTime(timezone=True), nullable=True) # Assuming you might have this
+    started_at = Column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Relationships (optional but recommended)
+    # Relationships
     user = relationship("User")
     learning_path = relationship("LearningPath")
 

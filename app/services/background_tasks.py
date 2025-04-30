@@ -21,9 +21,9 @@ from app.sections.schemas import SectionCreate
 from app.courses.crud import create_course, add_section_to_course
 from app.sections.crud import create_section
 from app.learning_path_courses.crud import add_course_to_learning_path
-from app.tasks.crud import create_user_task, update_user_task, get_user_task_by_task_id
-from app.tasks.schemas import UserTaskCreate, UserTaskUpdate
-from app.tasks.models import TaskStatusEnum, TaskStageEnum
+from app.backend_tasks.crud import create_user_task, update_user_task, get_user_task
+from app.backend_tasks.schemas import UserTaskCreate, UserTaskUpdate
+from app.backend_tasks.models import TaskStatusEnum, TaskStageEnum
 from app.models import CourseSection, Course
 
 # 全局任务状态跟踪

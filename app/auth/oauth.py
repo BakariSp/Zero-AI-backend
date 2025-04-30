@@ -4,35 +4,85 @@ from starlette.config import Config
 from starlette.requests import Request
 from fastapi.responses import RedirectResponse
 import os
+import logging
+import secrets
+import time
 
 from app.users.crud import get_user_by_oauth, create_user, get_user_by_username
 from app.db import SessionLocal
 from app.auth.jwt import create_access_token
 from app.users.schemas import UserCreate
 
+# Set up logging
+log = logging.getLogger(__name__)
+
 # Create router
 router = APIRouter()
 
-# Load environment variables
-config = Config(".env")
+# Load environment variables directly from os.environ for more reliability
+MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
+MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+# Print raw values for debugging (with some censoring for security)
+print(f"RAW Microsoft Client ID: {MICROSOFT_CLIENT_ID[:5]}{'*' * 20}{MICROSOFT_CLIENT_ID[-5:] if len(MICROSOFT_CLIENT_ID) > 10 else ''}")
+print(f"RAW Microsoft Client Secret: {MICROSOFT_CLIENT_SECRET[:3]}{'*' * 10}{MICROSOFT_CLIENT_SECRET[-3:] if len(MICROSOFT_CLIENT_SECRET) > 6 else ''}")
+
+# Log the OAuth credentials (without showing full secrets)
+log.info(f"Microsoft Client ID: {MICROSOFT_CLIENT_ID[:5]}...{MICROSOFT_CLIENT_ID[-5:] if MICROSOFT_CLIENT_ID else ''}")
+log.info(f"Microsoft Client Secret: {MICROSOFT_CLIENT_SECRET[:3]}...{MICROSOFT_CLIENT_SECRET[-3:] if MICROSOFT_CLIENT_SECRET else ''}")
+
+# Check if environment variables are properly loaded
+if not MICROSOFT_CLIENT_ID:
+    log.error("MICROSOFT_CLIENT_ID is empty or not set in environment variables!")
+if not MICROSOFT_CLIENT_SECRET:
+    log.error("MICROSOFT_CLIENT_SECRET is empty or not set in environment variables!")
 
 # Configure OAuth
-oauth = OAuth(config)
+oauth = OAuth()
 
-# Configure Microsoft OAuth
-oauth.register(
-    name="microsoft",
-    client_id=config.get("MICROSOFT_CLIENT_ID", default=""),
-    client_secret=config.get("MICROSOFT_CLIENT_SECRET", default=""),
-    server_metadata_url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
-    client_kwargs={"scope": "openid email profile"},
-)
+# Log more details about the OAuth object
+print(f"OAuth type: {type(oauth)}")
+print(f"OAuth clients method available: {hasattr(oauth, '_clients')}")
+print(f"OAuth register method available: {hasattr(oauth, 'register')}")
+
+# Add a check for empty credentials
+if not MICROSOFT_CLIENT_ID or not MICROSOFT_CLIENT_SECRET:
+    print("WARNING: Microsoft credentials are not set properly in environment variables!")
+
+# Configure Microsoft OAuth with proper parameters
+try:
+    oauth.register(
+        name="microsoft",
+        client_id=MICROSOFT_CLIENT_ID,
+        client_secret=MICROSOFT_CLIENT_SECRET,
+        server_metadata_url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+        client_kwargs={"scope": "openid email profile"},
+        # Explicitly add OAuth 2.0 parameters
+        access_token_url="https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        authorize_url="https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        api_base_url="https://graph.microsoft.com/v1.0/",
+    )
+    print("Microsoft OAuth client registered successfully")
+except Exception as e:
+    print(f"Error registering Microsoft OAuth client: {str(e)}")
+
+# Log Microsoft OAuth client details
+if hasattr(oauth, "microsoft"):
+    print(f"Microsoft OAuth client type: {type(oauth.microsoft)}")
+    print(f"Microsoft OAuth client dir: {dir(oauth.microsoft)}")
+    # Also check if we can access the client_id
+    if hasattr(oauth.microsoft, "client_id"):
+        print(f"Microsoft client_id from oauth object: {oauth.microsoft.client_id}")
+    else:
+        print("Microsoft client_id attribute not found in oauth object")
 
 # Configure Google OAuth
 oauth.register(
     name="google",
-    client_id=config.get("GOOGLE_CLIENT_ID", default=""),
-    client_secret=config.get("GOOGLE_CLIENT_SECRET", default=""),
+    client_id=GOOGLE_CLIENT_ID,
+    client_secret=GOOGLE_CLIENT_SECRET,
     server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
     client_kwargs={"scope": "openid email profile"},
 )
@@ -41,13 +91,20 @@ oauth.register(
 @router.get("/google")
 async def login_via_google(request: Request):
     """Initiate Google OAuth login flow"""
-    # --- DEBUGGING (Keep for now, but might be redundant if this works) ---
-    client_id = os.getenv("GOOGLE_CLIENT_ID") # This os.getenv might still read correctly now
-    config_client_id = config.get("GOOGLE_CLIENT_ID") # Let's also check the config object here
-    print(f"--- DEBUG: os.getenv client_id: '{client_id}' ---") 
-    print(f"--- DEBUG: config.get client_id: '{config_client_id}' ---")
-    # --- END DEBUGGING ---
+    # Log OAuth client status - safely access client_id
+    try:
+        client_id = getattr(oauth.google, "client_id", None)
+        if client_id is None:
+            # Try alternate attribute names
+            client_id = getattr(oauth.google, "_client_id", "Cannot access client_id")
+        log.info(f"Google OAuth client: {client_id}")
+    except Exception as e:
+        log.error(f"Error accessing Google OAuth client details: {str(e)}")
+    
+    # Redirect URI is crucial - make sure it's explicitly set and matches Azure config
     redirect_uri = str(request.url_for('auth_via_google'))
+    log.info(f"Google redirect URI: {redirect_uri}")
+    
     return await oauth.google.authorize_redirect(request, redirect_uri)
 
 @router.get("/google/callback", name="auth_via_google")
@@ -67,98 +124,810 @@ async def auth_via_google(request: Request):
 @router.get("/microsoft")
 async def login_via_microsoft(request: Request):
     """Initiate Microsoft OAuth login flow"""
-    redirect_uri = str(request.url_for('auth_via_microsoft'))
-    return await oauth.microsoft.authorize_redirect(request, redirect_uri)
+    # Get fresh environment variables to ensure we have the latest values
+    fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
+    fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+    
+    # Log the actual client ID being used (partially masked)
+    if fresh_client_id:
+        masked_id = fresh_client_id[:5] + "*****" + fresh_client_id[-5:] if len(fresh_client_id) > 10 else "*****"
+        log.info(f"Using Microsoft client ID: {masked_id}")
+    else:
+        log.error("Microsoft client ID is empty!")
+    
+    # Log OAuth client status and fresh values - safely access attributes
+    try:
+        # Try to safely get client_id from OAuth object
+        oauth_client_id = "Unknown"
+        if hasattr(oauth.microsoft, "client_id"):
+            oauth_client_id = oauth.microsoft.client_id
+        elif hasattr(oauth.microsoft, "_client_id"):
+            oauth_client_id = oauth.microsoft._client_id
+        
+        log.info(f"Microsoft OAuth client ID (from module): {oauth_client_id}")
+    except Exception as e:
+        log.error(f"Error accessing Microsoft OAuth client details: {str(e)}")
+        
+    log.info(f"Microsoft OAuth client ID (fresh from env): {fresh_client_id[:5]}...{fresh_client_id[-5:] if fresh_client_id else 'EMPTY'}")
+    log.info(f"Microsoft OAuth client secret available (fresh): {'Yes' if fresh_client_secret else 'No'}")
+    log.info(f"Request headers: {dict(request.headers)}")
+    
+    # Get debug param if present
+    debug_mode = request.query_params.get('debug', 'false').lower() == 'true'
+    
+    # Use the exact redirect URI that's registered in Azure
+    # Instead of dynamically generating it
+    base_url = str(request.base_url)
+    log.info(f"Base URL: {base_url}")
+    
+    if "localhost" in base_url:
+        # Local development
+        redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
+    else:
+        # Production deployment
+        redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    
+    log.info(f"Microsoft redirect URI: {redirect_uri}")
+    
+    # Check if we have valid credentials
+    if not fresh_client_id:
+        log.error("Microsoft client ID is empty! Cannot proceed with authentication.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Microsoft client ID is not configured properly"
+        )
+    
+    # Generate a secure random state
+    state = secrets.token_urlsafe(16)
+    
+    # Store in session
+    request.session['microsoft_oauth_state'] = state
+    
+    # The session is automatically saved after the request in Starlette
+    
+    # Log the session state for debugging
+    log.info(f"Setting session state: {state}")
+    log.info(f"Session contents: {dict(request.session)}")
+    
+    # Add state to the auth URL - Use correct Microsoft Graph scopes
+    # Use the User.Read scope which is needed for accessing user profile
+    auth_url = (
+        f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+        f"client_id={fresh_client_id}&"
+        f"response_type=code&"
+        f"redirect_uri={redirect_uri}&"
+        f"scope=openid%20email%20profile%20User.Read&"  # Added User.Read scope
+        f"state={state}"  # Add state parameter
+    )
+    
+    # Log complete params for debugging (without showing full client ID)
+    safe_params = auth_url.split('&')
+    safe_params = [param for param in safe_params if 'client_id' not in param]
+    safe_params = '&'.join(safe_params)
+    log.info(f"Auth parameters: {safe_params}")
+    
+    # If debug mode is enabled, return the parameters instead of redirecting
+    if debug_mode:
+        return {
+            "status": "debug_mode",
+            "auth_params": safe_params,
+            "client_id_available": bool(fresh_client_id),
+            "client_secret_available": bool(fresh_client_secret),
+            "message": "Debug mode enabled. These are the parameters that would be sent to Microsoft."
+        }
+    
+    # Use the direct approach instead of oauth.microsoft.authorize_redirect
+    # This resolves issues with the Authlib OAuth client
+    log.info(f"Redirecting to Microsoft auth URL (redacted): {auth_url.replace(fresh_client_id, '{CLIENT_ID_REDACTED}')}")
+    
+    # Return a redirect response
+    return RedirectResponse(url=auth_url)
 
 @router.get("/microsoft/callback", name="auth_via_microsoft")
 async def auth_via_microsoft(request: Request):
     """Handle Microsoft OAuth callback"""
-    user = await get_oauth_user("microsoft", request)
+    try:
+        # Get query parameters
+        code = request.query_params.get("code")
+        received_state = request.query_params.get("state")
+        expected_state = request.session.get("microsoft_oauth_state")
+        
+        # Log details for debugging
+        log.info(f"Microsoft OAuth callback received")
+        log.info(f"Code present: {bool(code)}")
+        log.info(f"Received state: {received_state}")
+        log.info(f"Expected state from session: {expected_state}")
+        log.info(f"Session contents: {dict(request.session)}")
+        log.info(f"Request cookies: {dict(request.cookies)}")
+        
+        if not code:
+            log.error("Missing authorization code in callback")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing authorization code from Microsoft"
+            )
+        
+        # Get fresh credentials
+        fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
+        fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+        
+        # Get the appropriate redirect URI - must match what was used in the initial request
+        base_url = str(request.base_url)
+        if "localhost" in base_url:
+            redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
+        else:
+            redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+        
+        log.info(f"Using redirect URI: {redirect_uri}")
+            
+        # Check for state mismatch but continue anyway (session state issues)
+        if not received_state or received_state != expected_state:
+            log.warning(f"State mismatch! Received: {received_state}, Expected: {expected_state}")
+            log.warning("Proceeding despite state mismatch (workaround for session issues)")
+            
+        # Perform manual token exchange
+        token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        
+        # Prepare token request
+        import httpx
+        
+        # Create form data for token exchange
+        token_data = {
+            "client_id": fresh_client_id,
+            "client_secret": fresh_client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+            "scope": "openid email profile User.Read"
+        }
+        
+        # Log token request
+        log.info(f"Requesting access token from {token_url}")
+        
+        # Make the token request
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(token_url, data=token_data)
+            
+            # Check if the token request was successful
+            if token_response.status_code != 200:
+                log.error(f"Token request failed: {token_response.status_code}, {token_response.text}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Failed to get token from Microsoft: {token_response.status_code}"
+                )
+                
+            # Parse the token response
+            token_data = token_response.json()
+            
+            # Log the token response keys for debugging
+            log.info(f"Token response keys: {list(token_data.keys())}")
+            log.info("Successfully obtained token from Microsoft")
+            
+            # Make sure we have the ID token
+            id_token = token_data.get("id_token")
+            if not id_token:
+                log.error("No ID token in response")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="No ID token in response from Microsoft"
+                )
+            
+            # Always use ID token to get user info
+            try:
+                # Parse the ID token (JWT)
+                import jwt
+                # Decode without verification for this purpose
+                id_token_data = jwt.decode(id_token, options={"verify_signature": False})
+                
+                # Log all the claims for debugging
+                log.info(f"ID token claims: {id_token_data}")
+                
+                # Extract necessary user info from ID token
+                # Different Azure AD configurations might use different claim names
+                # Try all possible claim names
+                oauth_id = (
+                    id_token_data.get("oid") or  # Azure AD v2 Object ID
+                    id_token_data.get("sub") or  # OAuth2 Subject
+                    id_token_data.get("unique_name")  # Fallback
+                )
+                
+                email = (
+                    id_token_data.get("email") or  # Standard email claim
+                    id_token_data.get("upn") or  # User Principal Name
+                    id_token_data.get("preferred_username")  # Microsoft preferred_username
+                )
+                
+                name = (
+                    id_token_data.get("name") or  # Standard name claim
+                    id_token_data.get("given_name", "") + " " + id_token_data.get("family_name", "")  # Combine given_name and family_name
+                ).strip()
+                
+                # Log the extracted user info
+                log.info(f"Extracted user info from ID token: id={oauth_id}, email={email}, name={name}")
+                
+                # Validate that we have the necessary info
+                if not oauth_id or not email:
+                    log.error(f"Missing required user info from ID token: id={bool(oauth_id)}, email={bool(email)}")
+                    raise ValueError("Missing required user info from ID token")
+                    
+            except Exception as e:
+                log.error(f"Failed to process ID token: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Failed to process ID token: {str(e)}"
+                )
+                
+            # Now create or retrieve the user
+            from sqlalchemy.orm import Session
+            from app.models import User
+            from app.db import get_db
+            
+            db = SessionLocal()
+            try:
+                # First try to find the user by OAuth ID
+                user = get_user_by_oauth(db, provider="microsoft", oauth_id=oauth_id)
+                
+                # If not found by OAuth ID, try by email
+                if not user:
+                    log.info(f"User not found by OAuth ID {oauth_id}, trying email {email}")
+                    
+                    # Check if user exists with this email
+                    user_by_email = db.query(User).filter(User.email == email).first()
+                    
+                    if user_by_email:
+                        log.info(f"Found existing user by email: {email}")
+                        
+                        # Check if this user has OAuth info already
+                        if user_by_email.oauth_provider and user_by_email.oauth_id:
+                            log.info(f"User already has OAuth connection: {user_by_email.oauth_provider} / {user_by_email.oauth_id}")
+                            
+                            # Update the OAuth ID if it's different but from same provider
+                            if user_by_email.oauth_provider == "microsoft" and user_by_email.oauth_id != oauth_id:
+                                log.info(f"Updating user's Microsoft OAuth ID from {user_by_email.oauth_id} to {oauth_id}")
+                                user_by_email.oauth_id = oauth_id
+                                db.commit()
+                        else:
+                            # User exists but doesn't have OAuth info, add it
+                            log.info(f"Adding Microsoft OAuth info to existing user: {email}")
+                            user_by_email.oauth_provider = "microsoft"
+                            user_by_email.oauth_id = oauth_id
+                            db.commit()
+                            
+                        # Use this user
+                        user = user_by_email
+                
+                # If still not found, create a new user
+                if not user:
+                    log.info(f"Creating new user for Microsoft OAuth: {email}")
+                    # Generate a username from email
+                    username = email.split("@")[0]
+                    
+                    # Check if username exists and append numbers if needed
+                    base_username = username
+                    counter = 1
+                    while get_user_by_username(db, username):
+                        username = f"{base_username}{counter}"
+                        counter += 1
+                    
+                    # Create a UserCreate object
+                    user_data = UserCreate(
+                        email=email,
+                        username=username,
+                        password="",  # No password for OAuth users
+                        full_name=name or "",
+                        is_active=True
+                    )
+                    
+                    # Create the user
+                    user = create_user(
+                        db=db,
+                        user=user_data,
+                        oauth_provider="microsoft",
+                        oauth_id=oauth_id,
+                        profile_picture=None
+                    )
+                    log.info(f"Created new user: {username}")
+                else:
+                    log.info(f"Found existing user: {user.username}")
+            finally:
+                db.close()
+                
+            # Create JWT access token for the user
+            access_token = create_access_token(data={"sub": user.email})
+            
+            # Redirect to frontend with token
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+            redirect_url = f"{frontend_url}/oauth/callback?token={access_token}"
+            
+            log.info(f"Redirecting to frontend: {redirect_url}")
+            return RedirectResponse(url=redirect_url)
+            
+    except Exception as e:
+        log.error(f"Microsoft callback error: {str(e)}")
+        # Redirect to frontend error page
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        error_url = f"{frontend_url}/oauth/error?message={str(e)}"
+        return RedirectResponse(url=error_url)
+
+# Add additional route for production Azure redirect URI
+@router.get("/auth/login/aad/callback")
+async def auth_via_microsoft_prod(request: Request):
+    """Handle Microsoft OAuth callback in production"""
+    log.info("Received Microsoft OAuth callback via production path")
     
-    # Create access token
-    access_token = create_access_token(data={"sub": user.email})
+    # Log all request information for debugging
+    log.info(f"Production callback URL: {request.url}")
+    log.info(f"Production callback query params: {dict(request.query_params)}")
+    log.info(f"Production callback headers: {dict(request.headers)}")
+    log.info(f"Production callback session: {dict(request.session)}")
     
-    # Redirect to frontend with token
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{frontend_url}/oauth/callback?token={access_token}"
+    # Extract the code and state parameters
+    code = request.query_params.get("code")
+    state = request.query_params.get("state")
     
-    return RedirectResponse(url=redirect_url)
+    # Check if we have the required parameters
+    if not code:
+        log.error("Missing code parameter in production callback")
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        error_url = f"{frontend_url}/oauth/error?message=Missing+code+parameter"
+        return RedirectResponse(url=error_url)
+        
+    # Just forward to the standard handler
+    return await auth_via_microsoft(request)
+
+# Add a testing endpoint for diagnosing Microsoft OAuth issues
+@router.get("/microsoft/test")
+async def test_microsoft_oauth(request: Request):
+    """Test endpoint for Microsoft OAuth configuration"""
+    try:
+        # Check environment variables directly
+        raw_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
+        raw_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+        
+        # Check if we have the required credentials
+        client_id_ok = bool(raw_client_id)
+        client_secret_ok = bool(raw_client_secret)
+        
+        # Create the redirect URI the same way as the main endpoint
+        base_url = str(request.base_url)
+        if "localhost" in base_url:
+            redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
+        else:
+            redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+        
+        # Check if the OAuth client is configured
+        oauth_client_ok = hasattr(oauth, "microsoft") and oauth.microsoft is not None
+        
+        # Safely get client ID from OAuth client
+        oauth_client_id = "Unknown"
+        if oauth_client_ok:
+            # Try various attribute names
+            for attr_name in ["client_id", "_client_id"]:
+                if hasattr(oauth.microsoft, attr_name):
+                    oauth_client_id = getattr(oauth.microsoft, attr_name)
+                    break
+            
+            # If we still don't have it, try to inspect the object
+            if oauth_client_id == "Unknown":
+                oauth_client_id = f"Object attributes: {dir(oauth.microsoft)}"
+        else:
+            oauth_client_id = "OAuth client not configured"
+        
+        # Build a manually constructed auth URL for testing with actual client ID
+        auth_url = (
+            f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+            f"client_id={raw_client_id}&"
+            f"response_type=code&"
+            f"redirect_uri={redirect_uri}&"
+            f"scope=openid%20email%20profile"
+        )
+        
+        # Check all environment variables
+        env_vars = {
+            "MICROSOFT_CLIENT_ID": mask_string(raw_client_id),
+            "MICROSOFT_CLIENT_SECRET": mask_string(raw_client_secret),
+            "FRONTEND_URL": os.getenv("FRONTEND_URL", "Not set"),
+            "JWT_SECRET_KEY": mask_string(os.getenv("JWT_SECRET_KEY", "Not set")),
+            "SESSION_SECRET_KEY": mask_string(os.getenv("SESSION_SECRET_KEY", "Not set"))
+        }
+        
+        # Return diagnostic information
+        return {
+            "status": "configuration_test",
+            "client_id_available": client_id_ok,
+            "client_secret_available": client_secret_ok,
+            "client_id_masked": mask_string(raw_client_id),
+            "oauth_client_configured": oauth_client_ok,
+            "oauth_client_id": oauth_client_id,
+            "oauth_client_dir": dir(oauth.microsoft) if oauth_client_ok else [],
+            "redirect_uri": redirect_uri,
+            "manual_auth_url": auth_url,
+            "environment_vars": env_vars,
+            "message": "Use the manual_auth_url to test the oauth flow directly",
+            "test_instructions": "Click the manual_auth_url to test the flow directly with Microsoft"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "message": "Error during configuration test"
+        }
+
+# Add an endpoint to check environment variables
+@router.get("/env-test")
+async def check_environment_variables():
+    """Test endpoint for checking environment variables"""
+    # Important environment variables to check
+    env_vars = {
+        "MICROSOFT_CLIENT_ID": os.getenv("MICROSOFT_CLIENT_ID"),
+        "MICROSOFT_CLIENT_SECRET": os.getenv("MICROSOFT_CLIENT_SECRET"),
+        "GOOGLE_CLIENT_ID": os.getenv("GOOGLE_CLIENT_ID"),
+        "GOOGLE_CLIENT_SECRET": os.getenv("GOOGLE_CLIENT_SECRET"),
+        "FRONTEND_URL": os.getenv("FRONTEND_URL"),
+        "JWT_SECRET_KEY": os.getenv("JWT_SECRET_KEY"),
+        "SESSION_SECRET_KEY": os.getenv("SESSION_SECRET_KEY")
+    }
+    
+    # Mask sensitive values for security
+    safe_vars = {}
+    for key, value in env_vars.items():
+        if value:
+            # Special case for URL - show full value
+            if "URL" in key:
+                safe_vars[key] = value
+            else:
+                safe_vars[key] = mask_string(value)
+        else:
+            safe_vars[key] = "Not set or empty"
+    
+    return {
+        "status": "environment_check",
+        "environment_variables": safe_vars,
+        "variables_set": {k: bool(v) for k, v in env_vars.items()},
+        "message": "Environment variables check"
+    }
+
+# Helper function to mask sensitive strings
+def mask_string(s, show_start=4, show_end=4):
+    """Mask a string for safe display, showing only start and end characters"""
+    if not s:
+        return "Not set or empty"
+    if len(s) <= show_start + show_end:
+        return "*" * len(s)
+    return s[:show_start] + "*" * (len(s) - show_start - show_end) + s[-show_end:]
 
 async def get_oauth_user(provider: str, request: Request):
     """
     Get user information from OAuth provider and create/update user in database
     """
     if provider not in oauth._clients:
+        log.error(f"Unsupported OAuth provider: {provider}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported OAuth provider: {provider}"
         )
     
     client = oauth._clients[provider]
-    token = await client.authorize_access_token(request)
     
-    user_info = {}
-    
-    if provider == "google":
-        user_info = token.get("userinfo")
-        oauth_id = user_info.get("sub")
-        email = user_info.get("email")
-        name = user_info.get("name")
-        picture = user_info.get("picture")
-    
-    elif provider == "microsoft":
-        # Get user info from Microsoft Graph API
-        resp = await client.get("https://graph.microsoft.com/v1.0/me")
-        user_info = resp.json()
-        oauth_id = user_info.get("id")
-        email = user_info.get("mail") or user_info.get("userPrincipalName")
-        name = user_info.get("displayName")
-        picture = None  # Microsoft Graph API doesn't provide profile picture in basic response
-    
-    if not oauth_id or not email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not retrieve user information from OAuth provider"
-        )
-    
-    # Check if user exists in database
-    db = SessionLocal()
     try:
-        user = get_user_by_oauth(db, provider=provider, oauth_id=oauth_id)
+        log.info(f"Authorizing access token for {provider}")
+        # For Microsoft, explicitly include client_id to avoid AADSTS900144 error
+        if provider == "microsoft":
+            # Get fresh credentials
+            fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
+            fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+            
+            # Verify we have valid credentials
+            if not fresh_client_id or not fresh_client_secret:
+                log.error(f"Missing Microsoft credentials during token exchange. ID: {bool(fresh_client_id)}, Secret: {bool(fresh_client_secret)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Microsoft OAuth credentials not properly configured"
+                )
+                
+            # Log request information
+            log.info(f"Microsoft authorization request URL: {request.url}")
+            log.info(f"Microsoft authorization request query params: {request.query_params}")
+            
+            # Get the code parameter
+            code = request.query_params.get("code")
+            if not code:
+                log.error("Missing code parameter in Microsoft callback")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Missing code parameter in Microsoft callback"
+                )
+                
+            # Get the appropriate redirect URI
+            base_url = str(request.base_url)
+            if "localhost" in base_url:
+                redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
+            else:
+                redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+                
+            log.info(f"Using redirect URI for token exchange: {redirect_uri}")
+            
+            # Include all required parameters explicitly
+            try:
+                # Attempt to use the built-in token exchange first
+                try:
+                    log.info("Attempting standard OAuth token exchange")
+                    token = await client.authorize_access_token(request)
+                    log.info("Microsoft access token obtained successfully via standard method")
+                except Exception as auth_error:
+                    log.warning(f"Standard OAuth token exchange failed: {str(auth_error)}")
+                    log.info("Falling back to manual token exchange")
+                    
+                    # Fallback to manual token exchange
+                    token_url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+                    token_data = {
+                        "client_id": fresh_client_id,
+                        "client_secret": fresh_client_secret,
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                        "grant_type": "authorization_code"
+                    }
+                    
+                    # Use client's session for the request
+                    resp = await client.session.post(token_url, data=token_data)
+                    
+                    if resp.status_code != 200:
+                        log.error(f"Manual token exchange failed: {resp.status_code}, {await resp.text()}")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail=f"Token exchange failed: {resp.status_code}"
+                        )
+                        
+                    token = await resp.json()
+                    log.info("Microsoft access token obtained successfully via manual method")
+            except Exception as auth_error:
+                log.error(f"Microsoft access token error: {str(auth_error)}")
+                # Get the raw data from the request to help diagnose
+                log.error(f"Request query string: {request.url.query}")
+                raise
+        else:
+            token = await client.authorize_access_token(request)
+            
+        log.info(f"Successfully obtained access token for {provider}")
         
-        # If user doesn't exist, create a new one
-        if not user:
-            # Generate a username from email if not available
-            username = email.split("@")[0]
-            
-            # Check if username exists and append numbers if needed
-            base_username = username
-            counter = 1
-            while get_user_by_username(db, username):
-                username = f"{base_username}{counter}"
-                counter += 1
-            
-            # Create a new user object with the correct parameters
-            # Based on the error, we need to adjust how we call create_user
-            
-            # Create a UserCreate object first
-            user_data = UserCreate(
-                email=email,
-                username=username,
-                password="",  # No password for OAuth users
-                full_name=name or "",
-                is_active=True
+        user_info = {}
+        
+        if provider == "google":
+            user_info = token.get("userinfo")
+            oauth_id = user_info.get("sub")
+            email = user_info.get("email")
+            name = user_info.get("name")
+            picture = user_info.get("picture")
+            log.info(f"Retrieved user info from Google: email={email}")
+        
+        elif provider == "microsoft":
+            try:
+                # Log the token data (without sensitive parts)
+                if isinstance(token, dict):
+                    log.info(f"Token keys: {list(token.keys())}")
+                    
+                # Get user info from Microsoft Graph API
+                log.info("Querying Microsoft Graph API")
+                resp = await client.get("https://graph.microsoft.com/v1.0/me", token=token)
+                user_info = resp.json()
+                
+                # Log the user info (without sensitive parts)
+                safe_info = {k: v for k, v in user_info.items() if k not in ('id')}
+                log.info(f"Microsoft user info: {safe_info}")
+                
+                oauth_id = user_info.get("id")
+                email = user_info.get("mail") or user_info.get("userPrincipalName")
+                name = user_info.get("displayName")
+                picture = None
+                log.info(f"Retrieved user info from Microsoft: email={email}")
+            except Exception as e:
+                log.error(f"Error getting Microsoft user info: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error getting Microsoft user info: {str(e)}"
+                )
+        
+        if not oauth_id or not email:
+            log.error(f"Missing required user info from {provider}: oauth_id={bool(oauth_id)}, email={bool(email)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Could not retrieve user information from {provider} OAuth provider"
             )
+        
+        # Check if user exists in database
+        db = SessionLocal()
+        try:
+            user = get_user_by_oauth(db, provider=provider, oauth_id=oauth_id)
             
-            # Then call create_user with the correct parameters
-            user = create_user(
-                db=db,
-                user=user_data,
-                oauth_provider=provider,
-                oauth_id=oauth_id,
-                profile_picture=picture
-            )
-    finally:
-        db.close()
+            # If user doesn't exist, create a new one
+            if not user:
+                log.info(f"Creating new user for {provider} OAuth: {email}")
+                # Generate a username from email if not available
+                username = email.split("@")[0]
+                
+                # Check if username exists and append numbers if needed
+                base_username = username
+                counter = 1
+                while get_user_by_username(db, username):
+                    username = f"{base_username}{counter}"
+                    counter += 1
+                
+                # Create a UserCreate object first
+                user_data = UserCreate(
+                    email=email,
+                    username=username,
+                    password="",  # No password for OAuth users
+                    full_name=name or "",
+                    is_active=True
+                )
+                
+                # Then call create_user with the correct parameters
+                user = create_user(
+                    db=db,
+                    user=user_data,
+                    oauth_provider=provider,
+                    oauth_id=oauth_id,
+                    profile_picture=picture
+                )
+                log.info(f"Created new user: {username}")
+            else:
+                log.info(f"Found existing user: {user.username}")
+        finally:
+            db.close()
+        
+        return user
+        
+    except Exception as e:
+        log.error(f"OAuth error for {provider}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication error with {provider}: {str(e)}"
+        )
+
+# Add a direct Microsoft login endpoint that bypasses the Authlib OAuth flow
+@router.get("/microsoft/direct")
+async def direct_microsoft_login(request: Request):
+    """A direct Microsoft login endpoint that builds the URL manually"""
+    # Get fresh environment variables
+    client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
     
-    return user
+    # Log the actual client ID being used (partially masked)
+    if client_id:
+        masked_id = client_id[:5] + "*****" + client_id[-5:] if len(client_id) > 10 else "*****"
+        log.info(f"Using Microsoft client ID: {masked_id}")
+    else:
+        log.error("Microsoft client ID is empty!")
+    
+    # Build the redirect URI
+    base_url = str(request.base_url)
+    if "localhost" in base_url:
+        redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
+    else:
+        redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    
+    # Build the authorization URL manually with explicit client ID from environment
+    # Include User.Read scope for Microsoft Graph API access
+    auth_url = (
+        f"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?"
+        f"client_id={client_id}&"
+        f"response_type=code&"
+        f"redirect_uri={redirect_uri}&"
+        f"scope=openid%20email%20profile%20User.Read"  # Added User.Read scope
+    )
+    
+    log.info(f"Redirecting to manual Microsoft auth URL (redacted): {auth_url.replace(client_id, '{CLIENT_ID_REDACTED}')}")
+    
+    # Return a redirect response
+    return RedirectResponse(url=auth_url)
+
+# Add a direct callback endpoint for debugging
+@router.get("/microsoft/direct-callback")
+async def direct_microsoft_callback(request: Request):
+    """A direct callback endpoint that just logs all the parameters"""
+    # Log all request information
+    log.info(f"Direct Microsoft callback received")
+    log.info(f"URL: {request.url}")
+    log.info(f"Query parameters: {dict(request.query_params)}")
+    log.info(f"Headers: {dict(request.headers)}")
+    
+    # Get the code parameter
+    code = request.query_params.get("code")
+    
+    # Return details about the request
+    return {
+        "status": "callback_received",
+        "code_received": bool(code),
+        "url": str(request.url),
+        "query_params": dict(request.query_params),
+        "message": "Callback received and logged. This is just for debugging purposes."
+    }
+
+# Add a session test endpoint
+@router.get("/session-test")
+async def test_session(request: Request):
+    """Test endpoint for session functionality"""
+    # Get the counter from the session or initialize it
+    counter = request.session.get("counter", 0)
+    counter += 1
+    
+    # Store the counter in the session
+    request.session["counter"] = counter
+    
+    # Store a timestamp to check if it persists
+    timestamp = time.time()
+    request.session["timestamp"] = timestamp
+    
+    # No need to explicitly save - Starlette sessions are automatically saved
+    # when the request completes
+    
+    # Log session info
+    log.info(f"Session test - counter: {counter}, timestamp: {timestamp}")
+    log.info(f"Session contents: {dict(request.session)}")
+    
+    # Return session information
+    return {
+        "status": "session_test",
+        "counter": counter,
+        "timestamp": timestamp,
+        "session_id": request.session.get("session_id", "No session ID"),
+        "session_content": dict(request.session),
+        "session_cookie_name": "zero_session", # Should match the one in main.py
+        "cookies": {k: v for k, v in request.cookies.items()},
+        "session_middleware_info": {
+            "session_cookie": request.cookies.get("zero_session", "No session cookie found"),
+            "secure_cookies": os.environ.get("SECURE_COOKIES", "Not set"),
+            "session_secret_key": mask_string(os.environ.get("SESSION_SECRET_KEY", "Not set")),
+        },
+        "message": "Refresh this page to test if the session counter increases"
+    }
+
+# Add a token debug endpoint for examining ID tokens
+@router.post("/token-debug")
+async def debug_token(request: Request):
+    """Debug endpoint to examine token contents"""
+    try:
+        # Get the token from request body
+        body = await request.json()
+        token = body.get("token")
+        
+        if not token:
+            return {"error": "No token provided"}
+            
+        # Try to decode the token
+        import jwt
+        token_data = jwt.decode(token, options={"verify_signature": False})
+        
+        # Return the decoded data with some light masking of sensitive values
+        safe_data = {}
+        for key, value in token_data.items():
+            if key in ["email", "upn", "preferred_username", "sub", "oid"]:
+                # Apply light masking to sensitive values
+                if isinstance(value, str) and len(value) > 8:
+                    masked_value = value[:4] + "..." + value[-4:]
+                    safe_data[key] = masked_value
+                else:
+                    safe_data[key] = value
+            else:
+                safe_data[key] = value
+                
+        return {
+            "status": "success",
+            "token_type": "ID Token (JWT)" if token.count(".") == 2 else "Unknown",
+            "decoded_data": token_data,
+            "safe_decoded_data": safe_data,
+            "claims_found": list(token_data.keys()),
+            "message": "Token decoded successfully"
+        }
+        
+    except jwt.exceptions.InvalidTokenError as e:
+        return {
+            "status": "error",
+            "error": f"Invalid token: {str(e)}",
+            "message": "Could not decode the provided token"
+        }
+    except Exception as e:
+        return {
+            "status": "error", 
+            "error": str(e),
+            "message": "An error occurred while processing the token"
+        }

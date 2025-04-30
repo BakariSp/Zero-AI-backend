@@ -8,6 +8,7 @@ from app.auth.jwt import router as auth_router
 from app.cards.routes import router as cards_router
 from app.db import init_db
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import Response
 from fastapi.encoders import jsonable_encoder
 from datetime import datetime
 import json
@@ -23,8 +24,18 @@ from app.learning_path_courses.routes import router as learning_path_courses_rou
 from app.recommendation.routes import router as recommendation_router
 from sqlalchemy import text
 from app.auth.oauth import router as oauth_router
-from app.tasks.routes import router as tasks_router
+from app.backend_tasks.routes import router as backend_tasks_router
+from app.user_tasks.routes import router as user_tasks_router
 from app.planner.ai import router as planner_router
+import logging
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+
+# Configure basic logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(__name__)
+
 # Load environment variables from .env file
 load_dotenv()
 print("Environment variables loaded:")
@@ -33,25 +44,107 @@ print(f"GOOGLE_CLIENT_ID: {'Yes' if os.getenv('GOOGLE_CLIENT_ID') else 'No'}")
 
 app = FastAPI(title="Zero AI API")
 
+# Define CORS origins before using middleware
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+origins = [
+    "http://localhost",
+    "http://localhost:3000",  # React frontend
+    "http://127.0.0.1:3000",  # Also allow 127.0.0.1
+    "http://localhost:8080",  # Vue frontend
+    "https://learnfromzero.app",  # Production domain
+    "https://www.learnfromzero.app",  # www subdomain if used
+    frontend_url
+]
+# Remove empty origins
+origins = [origin for origin in origins if origin]
+
+# OPTIONS preflight request handler middleware - this must be added FIRST
+@app.middleware("http")
+async def options_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        # For CORS preflight requests, return an empty 200 response with appropriate CORS headers
+        origin = request.headers.get("Origin", "")
+        path = request.url.path
+        
+        log.info(f"OPTIONS request received for path: {path}")
+        log.info(f"OPTIONS request headers: {request.headers}")
+        
+        # Create a response with appropriate CORS headers
+        response = Response(status_code=200)
+        
+        # Check if the origin is in the allowed origins
+        if origin in origins or "*" in origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            log.info(f"Setting Access-Control-Allow-Origin: {origin}")
+        elif len(origins) > 0:
+            response.headers["Access-Control-Allow-Origin"] = origins[0]
+            log.info(f"Setting Access-Control-Allow-Origin: {origins[0]} (default)")
+            
+        # Add other CORS headers
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With, Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "86400"  # Cache preflight response for 24 hours
+        
+        log.info(f"Handling OPTIONS preflight request for path: {path}, origin: {origin}")
+        log.info(f"Response headers: {response.headers}")
+        return response
+        
+    return await call_next(request)
+
 # Add SessionMiddleware - this is required for OAuth
 app.add_middleware(
     SessionMiddleware, 
-    secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-here")  # Use environment variable
+    secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-here"),  # Use environment variable
+    max_age=3600,  # Session lifetime in seconds
+    same_site="lax",
+    session_cookie="zero_session",  # Use a custom cookie name
+    https_only=os.getenv("ENVIRONMENT", "development").lower() == "production",  # Secure in production
 )
 
-# Configure CORS
-frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# Log session configuration
+log.info(f"Session middleware configured with:")
+log.info(f"- Cookie name: zero_session")
+log.info(f"- Max age: 3600 seconds")
+log.info(f"- Same site: lax")
+log.info(f"- HTTPS only: {os.getenv('ENVIRONMENT', 'development').lower() == 'production'}")
+log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")
+
+# Configure CORS - should be early in the middleware stack
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_url],  # Only allow requests from your frontend
+    allow_origins=origins,  # Use our defined origins list
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"],
+    expose_headers=["Content-Length", "Content-Type"],
+    max_age=86400,  # Cache preflight response for 24 hours
 )
 
-# Add middleware for user authentication
+# Production security middleware - only add in production environments
+is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
+if is_production:
+    app.add_middleware(SecurityHeadersMiddleware)
+    
+    # Only add HTTPS redirect in production and if not behind a proxy that terminates SSL
+    if not os.getenv("BEHIND_PROXY", "false").lower() == "true":
+        app.add_middleware(HTTPSRedirectMiddleware)
+    
+    # Add trusted host middleware in production
+    app.add_middleware(
+        TrustedHostMiddleware, 
+        allowed_hosts=["learnfromzero.app", "www.learnfromzero.app", os.getenv("ALLOWED_HOST", "*")]
+    )
+    
+    log.info("Production security middleware enabled")
+
+# Add middleware for user authentication - should come AFTER OPTIONS middleware
 @app.middleware("http")
 async def add_user_to_request(request: Request, call_next):
+    # Skip authentication for OPTIONS requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    
     user = get_user_from_request(request)
     request.state.user = user
     response = await call_next(request)
@@ -69,12 +162,16 @@ app.include_router(sections_router, prefix="/api", tags=["sections"])
 app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_path_courses"])
 app.include_router(recommendation_router, prefix="/api", tags=["recommendations"])
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
-app.include_router(tasks_router, prefix="/api", tags=["tasks"])
+app.include_router(backend_tasks_router, prefix="/api", tags=["backend_tasks"])
+app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
 app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
 # Initialize database on startup
 @app.on_event("startup")
 def startup_db_client():
     init_db()
+    log.info("Database initialized")
+    # Log the origins allowed for CORS
+    log.info(f"CORS allowed origins: {origins}")
 
 # Custom JSON encoder for datetime objects
 class CustomJSONEncoder(json.JSONEncoder):
@@ -95,3 +192,47 @@ def read_root():
 @app.get("/users/me", response_model=UserResponse)
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
+
+# Security headers middleware for production
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+# When running in production, use:
+# uvicorn main:app --host 0.0.0.0 --port $PORT
+# This allows the app to be accessible from outside the container/VM
+
+"""
+PRODUCTION DEPLOYMENT NOTES:
+---------------------------
+Environment variables for production:
+
+1. ENVIRONMENT = "production"  
+   - Enables production security middleware
+
+2. FRONTEND_URL = "https://learnfromzero.app"  
+   - Your frontend URL for CORS
+
+3. BEHIND_PROXY = "true" or "false"  
+   - Set to "true" if behind a proxy that terminates SSL
+
+4. ALLOWED_HOST = "learnfromzero.app"  
+   - Your application's hostname for TrustedHostMiddleware
+
+5. SESSION_SECRET_KEY = [secure random string]  
+   - Secret key for session middleware
+
+6. JWT_SECRET_KEY = [secure random string]  
+   - Secret key for JWT tokens
+
+7. DATABASE_URL = [your database connection string]  
+   - Production database connection
+
+8. PORT = [port number]  
+   - The port your app should listen on
+"""

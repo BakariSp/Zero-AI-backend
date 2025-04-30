@@ -41,6 +41,7 @@ class User(Base):
     daily_logs = relationship("DailyLog", back_populates="user")
     courses = relationship("UserCourse", back_populates="user")
     custom_sections = relationship("UserSection", back_populates="user")
+    daily_tasks = relationship("DailyTask", back_populates="user")
 
 # --- Define Association Tables FIRST ---
 
@@ -124,6 +125,7 @@ class LearningPath(Base):
     sections = relationship("CourseSection", back_populates="learning_path", cascade="all, delete-orphan")
     user_paths = relationship("UserLearningPath", back_populates="learning_path", cascade="all, delete-orphan")
     courses = relationship("Course", secondary="learning_path_courses", back_populates="learning_paths")
+    daily_tasks = relationship("DailyTask", back_populates="learning_path")
 
 class CourseSection(Base):
     __tablename__ = "course_sections"
@@ -142,6 +144,7 @@ class CourseSection(Base):
     learning_path = relationship("LearningPath", back_populates="sections")
     cards = relationship("Card", secondary="section_cards", back_populates="sections", order_by=section_cards.c.order_index)
     courses = relationship("Course", secondary="course_section_association", back_populates="sections")
+    daily_tasks = relationship("DailyTask", back_populates="section")
 
 class Card(Base):
     __tablename__ = "cards"
@@ -163,6 +166,7 @@ class Card(Base):
     sections = relationship("CourseSection", secondary="section_cards", back_populates="cards")
     saved_by_users = relationship("User", secondary="user_cards", back_populates="saved_cards")
     user_sections = relationship("UserSection", secondary="user_section_cards", back_populates="cards")
+    daily_tasks = relationship("DailyTask", back_populates="card")
     
     # Add a property to handle None values for resources
     @property
@@ -235,6 +239,7 @@ class Course(Base):
     sections = relationship("CourseSection", secondary="course_section_association", back_populates="courses")
     learning_paths = relationship("LearningPath", secondary="learning_path_courses", back_populates="courses")
     user_courses = relationship("UserCourse", back_populates="course")
+    daily_tasks = relationship("DailyTask", back_populates="course")
 
 # User course progress tracking
 class UserCourse(Base):
