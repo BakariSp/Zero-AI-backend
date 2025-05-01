@@ -679,6 +679,328 @@ class ParallelCardGeneratorManager:
         logging.info(f"Successfully generated {len(successful_cards)} out of {len(keywords)} cards in parallel for section '{section_title}'.")
         return successful_cards
 
+class LearningAssistantAgent(BaseAgent):
+    """Agent responsible for answering user questions and generating related cards during learning"""
+    
+    async def answer_question(
+        self,
+        user_query: str,
+        current_card_data: Optional[Dict[str, Any]] = None,
+        section_title: Optional[str] = None,
+        course_title: Optional[str] = None,
+        difficulty_level: str = "intermediate"
+    ) -> Dict[str, Any]:
+        """
+        Answers a user question and generates a related card
+        
+        Args:
+            user_query: The user's question or prompt
+            current_card_data: Data about the card the user is currently viewing
+            section_title: Title of the current section
+            course_title: Title of the current course
+            difficulty_level: Difficulty level for generated content
+            
+        Returns:
+            Dict with answer to question and a related card
+        """
+        try:
+            # Build context for the prompt
+            context_parts = []
+            if current_card_data:
+                card_context = (
+                    f"Current Card: {current_card_data.get('keyword')}\n"
+                    f"Question: {current_card_data.get('question')}\n"
+                    f"Answer: {current_card_data.get('answer')}\n"
+                )
+                context_parts.append(card_context)
+            
+            if course_title:
+                context_parts.append(f"Course: {course_title}")
+            if section_title:
+                context_parts.append(f"Section: {section_title}")
+                
+            context_str = "\n".join(context_parts) if context_parts else ""
+            
+            # Create cache key to avoid redundant computations
+            cache_params = {
+                "query": user_query,
+                "card_keyword": current_card_data.get("keyword") if current_card_data else None,
+                "section": section_title,
+                "course": course_title,
+                "difficulty": difficulty_level,
+                "version": "1.0"  # Increment if prompt changes
+            }
+            cache_key = generate_cache_key("learning_assistant", cache_params)
+            
+            async def generate_response():
+                prompt = f"""
+                You are an educational assistant helping a user who is currently studying.
+                
+                CONTEXT:
+                {context_str}
+                
+                USER QUERY:
+                {user_query}
+                
+                Please provide:
+                1. A direct, helpful response to the user's question (be accurate and educational)
+                2. A related flashcard that would help deepen understanding of this topic
+                
+                Format your entire response as a single JSON object with these fields:
+                {{
+                    "answer": "Your direct answer to the user's query. Be thorough but concise.",
+                    "related_card": {{
+                        "keyword": "A specific keyword related to the user's query but different from the current card",
+                        "question": "A clear question related to the keyword",
+                        "answer": "A concise and accurate answer to the question",
+                        "explanation": "A brief explanation providing more context or detail about the answer",
+                        "difficulty": "{difficulty_level}",
+                        "resources": [{{ "url": "valid_url", "title": "Resource Title" }}]
+                    }}
+                }}
+                
+                Ensure your answer is educational, accurate, and helpful. The related card should explore a concept connected to the user's query but shouldn't duplicate the current card's content.
+                """
+                
+                logging.debug(f"Generating learning assistant response with prompt:\n{prompt}")
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    messages=[
+                        {"role": "system", "content": "You are an expert educational assistant who helps users understand concepts and provides related information in JSON format."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1500,
+                    model=self.deployment,
+                    response_format={"type": "json_object"}
+                )
+                
+                content = response.choices[0].message.content.strip()
+                logging.debug(f"Raw learning assistant response:\n{content}")
+                data = self._extract_json_from_response(content)
+                
+                # Validate response structure
+                if not isinstance(data, dict):
+                    raise ValueError(f"Expected dict response, got {type(data)}")
+                
+                if "answer" not in data:
+                    raise ValueError("Missing 'answer' field in response")
+                
+                if "related_card" not in data or not isinstance(data["related_card"], dict):
+                    raise ValueError("Missing or invalid 'related_card' field in response")
+                
+                # Validate the card
+                card_data = data["related_card"]
+                required_fields = ["keyword", "question", "answer", "explanation"]
+                if not all(field in card_data for field in required_fields):
+                    logging.warning(f"Card missing required fields. Required: {required_fields}. Card: {card_data}")
+                    # Create placeholder card if missing fields
+                    data["related_card"] = {
+                        "keyword": card_data.get("keyword", "Related Topic"),
+                        "question": card_data.get("question", "What is this related topic?"),
+                        "answer": card_data.get("answer", "This is a related concept."),
+                        "explanation": card_data.get("explanation", "This relates to the current topic."),
+                        "difficulty": card_data.get("difficulty", difficulty_level),
+                        "resources": card_data.get("resources", [])
+                    }
+                
+                return data
+            
+            # Get from cache or create
+            data, from_cache = await get_or_create_cached_data(cache_key, generate_response)
+            
+            if from_cache:
+                logging.info(f"Retrieved learning assistant response from cache for query: {user_query[:50]}...")
+            
+            return data
+        
+        except Exception as e:
+            logging.error(f"Error in learning assistant agent: {e}", exc_info=True)
+            # Return a fallback response instead of raising to avoid breaking the user experience
+            return {
+                "answer": f"I'm sorry, I encountered an error while processing your question. Please try rephrasing or asking something else.",
+                "related_card": {
+                    "keyword": "Error Recovery",
+                    "question": "What should I do if the assistant can't answer my question?",
+                    "answer": "Try rephrasing your question or breaking it into smaller, more specific questions.",
+                    "explanation": "Complex or ambiguous questions might be difficult to process. Simpler, clearer questions often work better.",
+                    "difficulty": difficulty_level,
+                    "resources": []
+                }
+            }
+
+    async def generate_related_card(
+        self, 
+        keyword: str,
+        context: Optional[str] = None,
+        section_title: Optional[str] = None,
+        course_title: Optional[str] = None,
+        difficulty_level: str = "intermediate"
+    ) -> Dict[str, Any]:
+        """
+        Generates a single card related to a specific keyword or topic.
+        This is a streamlined version that just returns the card data without additional context.
+        
+        Args:
+            keyword: The keyword or topic to generate a card for
+            context: Additional context to guide generation
+            section_title: Current section title
+            course_title: Current course title
+            difficulty_level: Desired difficulty level
+            
+        Returns:
+            Dictionary with card data suitable for CardCreate
+        """
+        try:
+            # Try to use CardGeneratorAgent if available
+            if card_agent:
+                card_data = await card_agent.generate_card(
+                    keyword=keyword,
+                    context=context,
+                    section_title=section_title,
+                    course_title=course_title,
+                    difficulty=difficulty_level
+                )
+                if isinstance(card_data, dict):
+                    return card_data
+                else:
+                    # Convert from CardCreate object if needed
+                    return card_data.dict()
+            
+            # Fallback to direct generation if card_agent not available
+            cache_params = {
+                "keyword": keyword,
+                "context": context,
+                "section": section_title,
+                "course": course_title,
+                "difficulty": difficulty_level,
+                "version": "1.0"
+            }
+            cache_key = generate_cache_key("related_card", cache_params)
+            
+            async def create_card():
+                context_parts = []
+                if course_title:
+                    context_parts.append(f"Course: {course_title}")
+                if section_title:
+                    context_parts.append(f"Section: {section_title}")
+                if context:
+                    context_parts.append(f"Context: {context}")
+                context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
+                
+                prompt = f"""
+                You are an expert educational content creator specializing in flashcards.
+                Based on the provided keyword and context, generate a single educational flashcard.
+                
+                Context:
+                {context_str}
+                Keyword: "{keyword}"
+                Target Difficulty: {difficulty_level}
+                
+                Format the response as a single JSON object with the following exact structure and fields:
+                {{
+                    "keyword": "{keyword}",
+                    "question": "A clear question related to the keyword.",
+                    "answer": "A concise and accurate answer to the question.",
+                    "explanation": "A brief explanation providing more context or detail about the answer.",
+                    "difficulty": "{difficulty_level}",
+                    "resources": [{{ "url": "valid_url", "title": "Resource Title" }}]
+                }}
+                
+                Ensure the output is ONLY the JSON object, starting with {{ and ending with }}.
+                """
+                
+                logging.debug(f"Generating related card with prompt:\n{prompt}")
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    messages=[
+                        {"role": "system", "content": "You are an expert educational content creator who outputs flashcard data in JSON format."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000,
+                    model=self.deployment,
+                    response_format={"type": "json_object"}
+                )
+                
+                content = response.choices[0].message.content.strip()
+                data = self._extract_json_from_response(content)
+                
+                # Ensure required fields
+                required_fields = ["keyword", "question", "answer", "explanation"]
+                if not isinstance(data, dict) or not all(field in data for field in required_fields):
+                    logging.error(f"Response missing required fields for keyword '{keyword}'. Data: {data}")
+                    raise ValueError("Response missing required fields or not a dict.")
+                
+                # Ensure difficulty is set
+                data['difficulty'] = data.get('difficulty', difficulty_level)
+                
+                # Ensure resources is a list
+                if "resources" not in data or not isinstance(data["resources"], list):
+                    data["resources"] = []
+                
+                return data
+            
+            # Get from cache or create
+            data, from_cache = await get_or_create_cached_data(cache_key, create_card)
+            
+            if from_cache:
+                logging.info(f"Retrieved related card from cache for keyword: {keyword}")
+            
+            return data
+            
+        except Exception as e:
+            logging.error(f"Error generating related card: {e}", exc_info=True)
+            # Return a minimal valid card as fallback
+            return {
+                "keyword": keyword,
+                "question": f"What is {keyword}?",
+                "answer": f"This is a concept related to {section_title if section_title else 'the current topic'}.",
+                "explanation": "More information would normally be provided here.",
+                "difficulty": difficulty_level,
+                "resources": []
+            }
+
+# Initialize the global learning assistant agent
+learning_assistant_agent = None
+
+# Try to initialize the learning assistant agent
+try:
+    if general_client and GENERAL_DEPLOYMENT:
+        learning_assistant_agent = LearningAssistantAgent(
+            client=general_client, 
+            deployment=GENERAL_DEPLOYMENT
+        )
+        logging.info("Successfully initialized global LearningAssistantAgent")
+    else:
+        logging.warning("Could not initialize global LearningAssistantAgent: missing client or deployment")
+except Exception as e:
+    logging.error(f"Error initializing global LearningAssistantAgent: {e}")
+
+# Helper function to get the learning assistant agent
+def get_learning_assistant_agent() -> LearningAssistantAgent:
+    if not learning_assistant_agent:
+        raise RuntimeError("LearningAssistantAgent not initialized. Check Azure OpenAI configuration.")
+    return learning_assistant_agent
+
+# Legacy wrapper for backwards compatibility
+async def answer_learning_question(
+    user_query: str,
+    current_card_data: Optional[Dict[str, Any]] = None,
+    section_title: Optional[str] = None,
+    course_title: Optional[str] = None,
+    difficulty_level: str = "intermediate"
+) -> Dict[str, Any]:
+    """Legacy wrapper for answering user questions during learning"""
+    if not learning_assistant_agent:
+        raise RuntimeError("LearningAssistantAgent not initialized. Check Azure OpenAI configuration.")
+    return await learning_assistant_agent.answer_question(
+        user_query=user_query,
+        current_card_data=current_card_data,
+        section_title=section_title,
+        course_title=course_title,
+        difficulty_level=difficulty_level
+    )
 
 # --- Legacy function wrappers ---
 # Consider refactoring code that uses these to instantiate agents directly

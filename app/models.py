@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Table, JSON, Float
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Table, JSON, Float, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -28,6 +28,11 @@ class User(Base):
     full_name = Column(String(100), nullable=True)
     profile_picture = Column(String(255), nullable=True)
     
+    # Subscription type: 'free', 'standard', 'premium'
+    subscription_type = Column(String(20), default='free')
+    subscription_start_date = Column(DateTime, nullable=True)
+    subscription_expiry_date = Column(DateTime, nullable=True)
+    
     # Add relationships if needed
     # items = relationship("Item", back_populates="owner") 
     
@@ -41,7 +46,10 @@ class User(Base):
     daily_logs = relationship("DailyLog", back_populates="user")
     courses = relationship("UserCourse", back_populates="user")
     custom_sections = relationship("UserSection", back_populates="user")
-    daily_tasks = relationship("DailyTask", back_populates="user")
+    
+    # Use simple string references for cross-module models
+    daily_tasks = relationship("DailyTask", lazy="dynamic")
+    daily_usage = relationship("UserDailyUsage", back_populates="user")
 
 # --- Define Association Tables FIRST ---
 
@@ -125,7 +133,7 @@ class LearningPath(Base):
     sections = relationship("CourseSection", back_populates="learning_path", cascade="all, delete-orphan")
     user_paths = relationship("UserLearningPath", back_populates="learning_path", cascade="all, delete-orphan")
     courses = relationship("Course", secondary="learning_path_courses", back_populates="learning_paths")
-    daily_tasks = relationship("DailyTask", back_populates="learning_path")
+    daily_tasks = relationship("DailyTask", lazy="dynamic")
 
 class CourseSection(Base):
     __tablename__ = "course_sections"
@@ -144,7 +152,7 @@ class CourseSection(Base):
     learning_path = relationship("LearningPath", back_populates="sections")
     cards = relationship("Card", secondary="section_cards", back_populates="sections", order_by=section_cards.c.order_index)
     courses = relationship("Course", secondary="course_section_association", back_populates="sections")
-    daily_tasks = relationship("DailyTask", back_populates="section")
+    daily_tasks = relationship("DailyTask", lazy="dynamic")
 
 class Card(Base):
     __tablename__ = "cards"
@@ -166,7 +174,7 @@ class Card(Base):
     sections = relationship("CourseSection", secondary="section_cards", back_populates="cards")
     saved_by_users = relationship("User", secondary="user_cards", back_populates="saved_cards")
     user_sections = relationship("UserSection", secondary="user_section_cards", back_populates="cards")
-    daily_tasks = relationship("DailyTask", back_populates="card")
+    daily_tasks = relationship("DailyTask", lazy="dynamic")
     
     # Add a property to handle None values for resources
     @property
@@ -239,7 +247,7 @@ class Course(Base):
     sections = relationship("CourseSection", secondary="course_section_association", back_populates="courses")
     learning_paths = relationship("LearningPath", secondary="learning_path_courses", back_populates="courses")
     user_courses = relationship("UserCourse", back_populates="course")
-    daily_tasks = relationship("DailyTask", back_populates="course")
+    daily_tasks = relationship("DailyTask", lazy="dynamic")
 
 # User course progress tracking
 class UserCourse(Base):
@@ -275,3 +283,49 @@ class UserSection(Base):
     user = relationship("User", back_populates="custom_sections")
     section_template = relationship("CourseSection")
     cards = relationship("Card", secondary="user_section_cards", back_populates="user_sections")
+
+class UserDailyUsage(Base):
+    """
+    Model to track daily usage of features by users.
+    Specifically, how many learning paths and cards they've generated in a day.
+    """
+    __tablename__ = "user_daily_usage"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    usage_date = Column(Date, server_default=func.current_date(), nullable=False, index=True)
+    paths_generated = Column(Integer, server_default='0', nullable=False)
+    cards_generated = Column(Integer, server_default='0', nullable=False)
+    paths_daily_limit = Column(Integer, server_default='5', nullable=False)
+    cards_daily_limit = Column(Integer, server_default='20', nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationship to User
+    user = relationship("User", back_populates="daily_usage")
+    
+    __table_args__ = (
+        # Ensure a user can only have one record per day
+        {'sqlite_autoincrement': True},
+    )
+    
+    def __repr__(self):
+        return f"<UserDailyUsage(id={self.id}, user_id={self.user_id}, date='{self.usage_date}', paths={self.paths_generated}/{self.paths_daily_limit}, cards={self.cards_generated}/{self.cards_daily_limit})>"
+
+class PromotionCodeUsage(Base):
+    """
+    Model to track usage of promotion codes.
+    Ensures limits are respected even across server restarts.
+    """
+    __tablename__ = "promotion_code_usage"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    tier = Column(String(20), nullable=False)  # 'standard', 'premium', etc.
+    total_limit = Column(Integer, nullable=False)
+    times_used = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    def __repr__(self):
+        return f"<PromotionCodeUsage(code='{self.code}', tier='{self.tier}', used={self.times_used}/{self.total_limit})>"

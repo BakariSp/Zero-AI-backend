@@ -20,6 +20,7 @@ from app.sections.schemas import (
 from app.services.ai_generator import get_card_generator_agent, CardGeneratorAgent
 from app.cards.crud import create_card as crud_create_card
 from app.cards.schemas import CardCreate
+from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
 
@@ -281,44 +282,55 @@ async def generate_test_cards_for_section(
     current_user: User = Depends(get_current_active_user) # Add auth if needed
 ):
     """
-    (For Testing) Generates a specified number of cards for a given section ID based on its title.
+    Generate test cards for a section
     """
-    # Optional: Add permission check (e.g., superuser only)
-    # if not current_user.is_superuser:
-    #     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not allowed")
-
-    section = crud.get_section(db, section_id=section_id)
-    if not section:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Section not found")
-
-    # Assuming learning path difficulty is stored somewhere or use a default
-    # You might want to fetch the associated Learning Path to get its difficulty
-    # For now, using a default.
-    difficulty = "intermediate"
-
     try:
-        # --- FIX: Use the helper function to get the initialized agent ---
+        # Check user's daily usage limit for cards
+        resources = get_user_remaining_resources(db, current_user.id)
+        
+        # Check if user has reached their daily limit
+        remaining_cards = resources["cards"]["remaining"]
+        if remaining_cards <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Daily limit reached for cards. Your limit is {resources['cards']['limit']} cards per day."
+            )
+        
+        # Adjust number of cards to generate based on remaining quota
+        if num_cards > remaining_cards:
+            num_cards = remaining_cards
+            
+        # Continue with existing implementation...
+        section = crud.get_section(db, section_id)
+        if not section:
+            raise HTTPException(status_code=404, detail=f"Section with ID {section_id} not found")
+
+        # Get the course title for better context
+        course_title = None
+        if section.course:
+            course_title = section.course.title
+            
+        # Initialize the card generator
         try:
-            agent = get_card_generator_agent()
-        except RuntimeError as e:
-             # Handle case where agent wasn't initialized (e.g., missing config)
-             logging.error(f"Failed to get CardGeneratorAgent: {e}")
-             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"AI Service Unavailable: {e}")
-        # --- END FIX ---
+            card_generator = get_card_generator_agent()
+        except Exception as e:
+            logging.error(f"Failed to initialize card generator: {e}")
+            raise HTTPException(status_code=500, detail="Failed to initialize AI service")
 
-        logging.info(f"Generating {num_cards} test cards for section '{section.title}' (ID: {section_id}) with difficulty '{difficulty}'")
-
-        # Call the generator without course_title
-        generated_card_data: List[CardCreate] = await agent.generate_multiple_cards_from_topic(
-            topic=section.title,
+        # Generate cards
+        generated_card_data = await card_generator.generate_multiple_cards(
+            section_title=section.title,
+            course_title=course_title,
             num_cards=num_cards,
-            # course_title=None, # Explicitly None or just omit
-            difficulty=difficulty
+            difficulty=section.difficulty_level or "intermediate"
         )
 
-        created_cards = []
-        # card_order = 1 # Start card order from 1 for this batch - Using helper now
+        if not generated_card_data:
+            raise HTTPException(status_code=500, detail="No cards were generated")
 
+        # Save the generated cards to the database
+        created_cards = []
+        
         for card_data in generated_card_data:
             try:
                 # Create card (create_card handles duplicates by keyword)
@@ -332,6 +344,9 @@ async def generate_test_cards_for_section(
                 crud.add_card_to_section(db, section_id, card_db.id, next_order)
                 created_cards.append(card_db)
                 logging.info(f"  Created/Linked Card ID {card_db.id} ('{card_db.keyword}') to Section {section_id} with order {next_order}")
+                
+                # Increment user's daily usage for each card created
+                increment_user_resource_usage(db, current_user.id, "cards")
 
             except Exception as card_err:
                 logging.error(f"Error processing/saving card '{getattr(card_data, 'keyword', 'N/A')}' for section {section_id}: {card_err}", exc_info=True)

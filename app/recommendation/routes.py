@@ -20,6 +20,7 @@ from app.services.learning_path_planner import LearningPathPlannerService
 from app.auth.jwt import get_current_active_user
 from app.learning_paths.crud import assign_learning_path_to_user
 from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation, schedule_structured_learning_path_generation, get_task_status
+from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
 
@@ -153,6 +154,19 @@ async def generate_and_save_learning_path(
     
     Cards are generated in the background to avoid blocking the request.
     """
+    # Check user's daily usage limit for learning paths
+    from app.setup import increment_user_resource_usage, get_user_remaining_resources
+    
+    # Get current resources
+    resources = get_user_remaining_resources(db, current_user.id)
+    
+    # Check if user has reached their daily limit
+    if resources["paths"]["remaining"] <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Daily limit reached for learning paths. Your limit is {resources['paths']['limit']} paths per day."
+        )
+    
     # Initialize the learning path planner service
     planner_service = LearningPathPlannerService()
     
@@ -183,6 +197,9 @@ async def generate_and_save_learning_path(
         user_id=current_user.id,
         learning_path_id=learning_path_id
     )
+    
+    # Increment user's daily usage for learning paths
+    increment_user_resource_usage(db, current_user.id, "paths")
     
     # Get the learning path without waiting for card generation
     learning_path = db.query(LearningPath).filter(LearningPath.id == learning_path_id).first()

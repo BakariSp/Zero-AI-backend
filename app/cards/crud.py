@@ -1,11 +1,14 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, select, update, insert
+from sqlalchemy import func, select, update, insert, text
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 import logging
 
-from app.models import Card, User, CourseSection, section_cards
+from app.models import Card, User, CourseSection, section_cards, LearningPath, UserLearningPath
 from app.cards.schemas import CardCreate, CardUpdate
+from app.users.crud import check_subscription_limits
+from app.models import user_cards
+from app.user_daily_usage.crud import increment_usage
 
 # Helper function to get the next order index
 def _get_next_card_order_in_section(db: Session, section_id: int) -> int:
@@ -54,17 +57,18 @@ def create_card(db: Session, card_data: CardCreate, section_id: Optional[int] = 
         return existing_card
     else:
         logging.info(f"Creating new card with keyword '{card_data.keyword}'.")
-        # --- FIX: Use direct field names from CardCreate ---
+        # Create card with all fields from CardCreate model
         db_card = Card(
             keyword=card_data.keyword,
-            question=card_data.question,      # Use question directly
-            answer=card_data.answer,        # Use answer directly
-            explanation=card_data.explanation, # Use explanation directly
-            difficulty=card_data.difficulty
-            # owner_id=owner_id             # Removed owner_id assignment
-            # Add any other necessary fields from your Card model
+            question=card_data.question,
+            answer=card_data.answer,
+            explanation=card_data.explanation,
+            difficulty=card_data.difficulty,
+            resources=card_data.resources,
+            created_by=card_data.created_by,
+            level=card_data.level,
+            tags=card_data.tags
         )
-        # --- END FIX ---
 
         db.add(db_card)
         db.commit()
@@ -211,6 +215,15 @@ def save_card_for_user(
             "recommended_by": assoc_data.recommended_by
         }
     
+    # Check if user has reached their subscription limit for cards
+    has_reached_limit, remaining = check_subscription_limits(db, user_id, 'cards')
+    if has_reached_limit:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You have reached your subscription limit for saved cards. "
+                   f"Please upgrade your subscription to save more cards."
+        )
+    
     # Save card for user
     db.execute(
         """
@@ -236,6 +249,16 @@ def save_card_for_user(
         }
     )
     db.commit()
+    
+    # Increment the daily usage count for cards
+    try:
+        # This will increment the cards_generated count and check daily limits
+        increment_usage(db, user_id, "cards")
+        logging.info(f"Incremented daily card usage for user {user_id}")
+    except Exception as e:
+        logging.error(f"Error incrementing card usage for user {user_id}: {str(e)}")
+        # We don't want to fail the operation if the usage tracking fails
+        # The card was already saved, so we'll continue
     
     # Get the newly created association
     assoc_data = db.execute(
@@ -362,24 +385,115 @@ def remove_card_from_user(db: Session, user_id: int, card_id: int) -> bool:
     
     return True
 
-# You might need a helper function like this (adapt to your models)
-# def get_next_card_order_in_section(db: Session, section_id: int) -> int:
-#    max_order = db.query(func.max(card_section.c.order_index))\
-#                  .filter(card_section.c.section_id == section_id)\
-#                  .scalar()
-#    return (max_order or 0) + 1 
+def remove_card_from_user_learning_path(db: Session, user_id: int, card_id: int, section_id: Optional[int] = None) -> bool:
+    """
+    Remove a card from sections in a user's learning path.
+    If section_id is provided, only removes from that specific section.
+    Otherwise, removes from all sections in user's learning paths.
+    
+    If the card is only associated with this user's sections and not with any other users or sections,
+    the card will be completely deleted from the database.
+    """
+    import logging
+    
+    # First, verify the card exists
+    card = get_card(db, card_id=card_id)
+    if not card:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Card not found"
+        )
+    
+    # Record the sections to remove the card from
+    sections_to_remove_from = []
+    
+    if section_id:
+        # Check if section exists in one of the user's learning paths
+        section_query = db.query(CourseSection).join(
+            LearningPath, CourseSection.learning_path_id == LearningPath.id
+        ).join(
+            UserLearningPath, UserLearningPath.learning_path_id == LearningPath.id
+        ).filter(
+            CourseSection.id == section_id,
+            UserLearningPath.user_id == user_id
+        )
+        
+        if db.query(section_query.exists()).scalar() is False:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Section not found or not accessible by user"
+            )
+        
+        sections_to_remove_from = [section_id]
+    else:
+        # Get all section IDs from the user's learning paths
+        user_section_ids = db.query(CourseSection.id).join(
+            LearningPath, CourseSection.learning_path_id == LearningPath.id
+        ).join(
+            UserLearningPath, UserLearningPath.learning_path_id == LearningPath.id
+        ).filter(
+            UserLearningPath.user_id == user_id
+        ).all()
+        
+        # Extract IDs from the result
+        sections_to_remove_from = [section_id for (section_id,) in user_section_ids]
+    
+    # Remove the section-card associations
+    if sections_to_remove_from:
+        logging.info(f"Removing card {card_id} from sections: {sections_to_remove_from}")
+        db.execute(
+            section_cards.delete().where(
+                section_cards.c.section_id.in_(sections_to_remove_from),
+                section_cards.c.card_id == card_id
+            )
+        )
+    
+    # Check if this card is associated with any other sections
+    other_section_count = db.query(section_cards).filter(
+        section_cards.c.card_id == card_id
+    ).count()
+    
+    # Check if this card is saved by any users
+    saved_by_users_count = db.query(user_cards).filter(
+        user_cards.c.card_id == card_id
+    ).count()
+    
+    # If the card is not associated with any other sections or users, delete it completely
+    if other_section_count == 0 and saved_by_users_count == 0:
+        logging.info(f"Card {card_id} is not used elsewhere, deleting completely")
+        db.query(Card).filter(Card.id == card_id).delete()
+        logging.info(f"Card {card_id} deleted from the database")
+    else:
+        logging.info(f"Card {card_id} is still used in {other_section_count} sections and saved by {saved_by_users_count} users")
+    
+    db.commit()
+    return True
 
-# Add the link_card_to_section function if it doesn't exist or is elsewhere
-# (Assuming you have a SectionCardLink association table/model)
 def link_card_to_section(db: Session, card_id: int, section_id: int):
-    from app.models.associations import SectionCardLink # Adjust import as needed
+    """
+    Links a card to a section by creating an entry in the section_cards association table.
+    Uses the section_cards table defined in app.models.
+    """
+    # Import the section_cards association table
+    from app.models import section_cards
+    from sqlalchemy import text
 
-    # Check if the link already exists
-    exists = db.query(SectionCardLink).filter_by(section_id=section_id, card_id=card_id).first()
+    # Check if link already exists
+    exists = db.execute(
+        text("SELECT 1 FROM section_cards WHERE section_id = :section_id AND card_id = :card_id"),
+        {"section_id": section_id, "card_id": card_id}
+    ).fetchone()
+
     if not exists:
-        link = SectionCardLink(section_id=section_id, card_id=card_id)
-        db.add(link)
+        # Get the next order index
+        next_order = _get_next_card_order_in_section(db, section_id)
+        
+        # Add the association
+        db.execute(
+            text("INSERT INTO section_cards (section_id, card_id, order_index) VALUES (:section_id, :card_id, :order_index)"),
+            {"section_id": section_id, "card_id": card_id, "order_index": next_order}
+        )
         db.commit()
-        logging.info(f"Linked card {card_id} to section {section_id}.")
+        logging.info(f"Linked card {card_id} to section {section_id} with order_index {next_order}.")
     else:
         logging.info(f"Card {card_id} already linked to section {section_id}.") 

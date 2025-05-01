@@ -37,7 +37,7 @@ class DailyTask(Base):
     card = relationship("Card", back_populates="daily_tasks", foreign_keys=[card_id])
     section = relationship("CourseSection", back_populates="daily_tasks", foreign_keys=[section_id])
     course = relationship("Course", back_populates="daily_tasks", foreign_keys=[course_id])
-    learning_path = relationship("LearningPath", foreign_keys=[learning_path_id])
+    learning_path = relationship("LearningPath", back_populates="daily_tasks", foreign_keys=[learning_path_id])
 
     def __repr__(self):
         return f"<DailyTask(id={self.id}, user_id={self.user_id}, title='{self.title}', scheduled_date='{self.scheduled_date}')>" 

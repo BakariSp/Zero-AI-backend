@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import logging
+from sqlalchemy.sql import text
 
 from app.db import SessionLocal
 from app.auth.jwt import get_current_active_user
@@ -26,12 +27,14 @@ from app.cards.crud import (
     get_user_saved_cards,
     save_card_for_user,
     update_user_card,
-    remove_card_from_user
+    remove_card_from_user,
+    remove_card_from_user_learning_path
 )
 from app.services.ai_generator import (
     generate_card_with_ai,
     get_card_generator_agent
 )
+from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
 
@@ -84,6 +87,12 @@ def create_new_card(
     current_user: User = Depends(get_current_active_user)
 ):
     """Create a new card (admin only)"""
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -100,6 +109,12 @@ def update_existing_card(
     current_user: User = Depends(get_current_active_user)
 ):
     """Update an existing card (admin only)"""
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -119,6 +134,12 @@ def delete_existing_card(
     current_user: User = Depends(get_current_active_user)
 ):
     """Delete a card (admin only)"""
+    if current_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    
     if not current_user.is_superuser:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -197,6 +218,80 @@ def remove_saved_card(
     remove_card_from_user(db=db, user_id=current_user.id, card_id=card_id)
     return {"detail": "Card removed successfully"}
 
+@router.delete("/users/me/learning-paths/cards/{card_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_card_from_learning_path(
+    card_id: int,
+    section_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Remove a card from a section in the user's learning path.
+    This doesn't delete the card entirely, just removes the association with the section.
+    """
+    try:
+        # Check if the request has the correct authentication
+        if current_user is None:
+            logging.error(f"No user found for card deletion: card_id={card_id}, section_id={section_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        logging.info(f"User {current_user.id} is deleting card {card_id} from section {section_id}")
+        remove_card_from_user_learning_path(db, user_id=current_user.id, card_id=card_id, section_id=section_id)
+        return {"detail": "Card removed from learning path successfully"}
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        logging.error(f"HTTP exception during card deletion: {e.detail}")
+        raise e
+    except Exception as e:
+        # Log any unexpected errors
+        logging.error(f"Error removing card {card_id} from learning path: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove card: {str(e)}"
+        )
+
+# Add a duplicate route for the path that's actually being used by the frontend
+# This ensures backward compatibility
+@router.delete("/learning-paths/cards/{card_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_card_from_learning_path_alt_path(
+    card_id: int,
+    section_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Alternative path for removing a card from a learning path.
+    This is a duplicate of the above endpoint to handle a different URL pattern.
+    """
+    try:
+        # Check if the request has the correct authentication
+        if current_user is None:
+            logging.error(f"No user found for card deletion (alt path): card_id={card_id}, section_id={section_id}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        logging.info(f"User {current_user.id} is deleting card {card_id} from section {section_id} (alt path)")
+        remove_card_from_user_learning_path(db, user_id=current_user.id, card_id=card_id, section_id=section_id)
+        return {"detail": "Card removed from learning path successfully"}
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        logging.error(f"HTTP exception during card deletion (alt path): {e.detail}")
+        raise e
+    except Exception as e:
+        # Log any unexpected errors
+        logging.error(f"Error removing card {card_id} from learning path (alt path): {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove card: {str(e)}"
+        )
+
 @router.post("/generate-card", response_model=CardResponse)
 async def generate_ai_card(
     request: GenerateCardRequest,
@@ -205,25 +300,17 @@ async def generate_ai_card(
 ):
     """Generate a card using AI based on a keyword, potentially linking to a section."""
     try:
-        # Check if card with this keyword already exists
-        # Note: create_card in crud.py now handles checking existence and linking
-        # existing_card = get_card_by_keyword(db, request.keyword)
-        # if existing_card:
-        #     logging.info(f"Card with keyword '{request.keyword}' already exists (ID: {existing_card.id}). Will link if section provided.")
-            # The create_card function will handle returning the existing card
-            # and linking it to the section if necessary.
-
-        # --- Option 1: Use legacy wrapper (if updated correctly) ---
-        # card_data: CardCreate = await generate_card_with_ai(
-        #     keyword=request.keyword,
-        #     context=request.context,
-        #     # Pass section/course/difficulty if available in request or defaults
-        #     section_title=None, # Example: Get from request if needed
-        #     course_title=None,  # Example: Get from request if needed
-        #     difficulty="intermediate" # Example: Get from request or default
-        # )
-
-        # --- Option 2: Get agent instance and call method (Preferred) ---
+        # Check user's daily usage limit for cards
+        resources = get_user_remaining_resources(db, current_user.id)
+        
+        # Check if user has reached their daily limit
+        if resources["cards"]["remaining"] <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Daily limit reached for cards. Your limit is {resources['cards']['limit']} cards per day."
+            )
+        
+        # Get agent instance and call method (Preferred)
         try:
             card_generator = get_card_generator_agent()
         except RuntimeError as e:
@@ -237,32 +324,19 @@ async def generate_ai_card(
              course_title=request.course_title,
              difficulty=request.difficulty or "intermediate" # Use request difficulty or default
         )
-        # --- End Option 2 ---
-
 
         # Create the card in the database, passing section_id for linking
         # The crud function handles checking for duplicates and linking
         card = create_card(db=db, card_data=card_data, section_id=request.section_id)
+        
+        # Increment user's daily usage for cards
+        increment_user_resource_usage(db, current_user.id, "cards")
 
         # Return using CardResponse schema
         return CardResponse.from_orm(card) # Use from_orm for Pydantic v2+
-
-    except ValueError as ve:
-         # Catch specific errors like JSON parsing or missing fields from AI
-         logging.error(f"Value error during AI card generation: {ve}", exc_info=True)
-         raise HTTPException(
-             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, # 422 or 500 depending on context
-             detail=f"Failed to process AI response: {str(ve)}"
-         )
-    except RuntimeError as rte:
-         # Catch agent initialization errors
-         logging.error(f"Runtime error during AI card generation: {rte}", exc_info=True)
-         raise HTTPException(
-             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-             detail=f"AI Service Unavailable: {str(rte)}"
-         )
+        
     except Exception as e:
-        logging.error(f"Unexpected error generating card: {e}", exc_info=True)
+        logging.error(f"Error generating card: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate card: {str(e)}"

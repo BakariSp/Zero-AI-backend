@@ -26,7 +26,10 @@ from sqlalchemy import text
 from app.auth.oauth import router as oauth_router
 from app.backend_tasks.routes import router as backend_tasks_router
 from app.user_tasks.routes import router as user_tasks_router
+from app.user_daily_usage.routes import router as user_daily_usage_router
 from app.planner.ai import router as planner_router
+from app.routers.learning_assistant import router as learning_assistant_router
+from app.routes import router as app_routes
 import logging
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -145,9 +148,28 @@ async def add_user_to_request(request: Request, call_next):
     if request.method == "OPTIONS":
         return await call_next(request)
     
+    # Log the requested path to help with debugging
+    logging.info(f"Processing request for path: {request.url.path}, method: {request.method}")
+    
+    # Log Authorization header presence (not content for security)
+    auth_header = request.headers.get("Authorization")
+    logging.info(f"Authorization header present: {auth_header is not None}")
+    
     user = get_user_from_request(request)
     request.state.user = user
+    
+    # Log if user was found through the middleware
+    if user:
+        logging.info(f"User identified through middleware: {user.get('userId', 'unknown')}")
+    else:
+        logging.info("No user identified through middleware, will try JWT auth")
+    
     response = await call_next(request)
+    
+    # If unauthorized response, log the path for debugging
+    if response.status_code == 401:
+        logging.warning(f"Unauthorized access to path: {request.url.path}")
+    
     return response
 
 # Include routers - make sure the prefix is correct
@@ -164,7 +186,10 @@ app.include_router(recommendation_router, prefix="/api", tags=["recommendations"
 app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
 app.include_router(backend_tasks_router, prefix="/api", tags=["backend_tasks"])
 app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
+app.include_router(user_daily_usage_router, prefix="/api", tags=["user_daily_usage"])
 app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
+app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])
+app.include_router(app_routes, prefix="/api", tags=["app"])
 # Initialize database on startup
 @app.on_event("startup")
 def startup_db_client():

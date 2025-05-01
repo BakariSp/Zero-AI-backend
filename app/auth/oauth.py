@@ -69,14 +69,14 @@ except Exception as e:
     print(f"Error registering Microsoft OAuth client: {str(e)}")
 
 # Log Microsoft OAuth client details
-if hasattr(oauth, "microsoft"):
-    print(f"Microsoft OAuth client type: {type(oauth.microsoft)}")
-    print(f"Microsoft OAuth client dir: {dir(oauth.microsoft)}")
-    # Also check if we can access the client_id
-    if hasattr(oauth.microsoft, "client_id"):
-        print(f"Microsoft client_id from oauth object: {oauth.microsoft.client_id}")
-    else:
-        print("Microsoft client_id attribute not found in oauth object")
+# if hasattr(oauth, "microsoft"):
+#     print(f"Microsoft OAuth client type: {type(oauth.microsoft)}")
+#     print(f"Microsoft OAuth client dir: {dir(oauth.microsoft)}")
+#     # Also check if we can access the client_id
+#     if hasattr(oauth.microsoft, "client_id"):
+#         print(f"Microsoft client_id from oauth object: {oauth.microsoft.client_id}")
+#     else:
+#         print("Microsoft client_id attribute not found in oauth object")
 
 # Configure Google OAuth
 oauth.register(

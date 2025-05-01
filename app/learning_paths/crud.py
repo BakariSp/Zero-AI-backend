@@ -1,11 +1,14 @@
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
+import logging
 
 from app.models import LearningPath, CourseSection, UserLearningPath, User, Course
 from app.backend_tasks.models import UserTask
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from sqlalchemy.orm import joinedload, selectinload
+from app.users.crud import check_subscription_limits
+from app.user_daily_usage.crud import increment_usage
 
 def get_learning_path(db: Session, path_id: int) -> Optional[LearningPath]:
     return db.query(LearningPath).filter(LearningPath.id == path_id).first()
@@ -112,6 +115,20 @@ def assign_learning_path_to_user(
     if existing:
         return existing
     
+    # Check if user has reached their daily limit for learning paths
+    has_reached_limit, remaining = check_subscription_limits(db, user_id, 'paths')
+    if has_reached_limit:
+        # Get the user's daily limit
+        from app.user_daily_usage.crud import get_or_create_daily_usage
+        daily_usage = get_or_create_daily_usage(db, user_id)
+        
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"You have reached your daily limit for learning paths. "
+                   f"Your limit is {daily_usage.paths_daily_limit} paths per day. "
+                   f"Please try again tomorrow or upgrade your subscription for higher limits."
+        )
+    
     # Create new user learning path
     db_user_path = UserLearningPath(
         user_id=user_id,
@@ -121,6 +138,17 @@ def assign_learning_path_to_user(
     db.add(db_user_path)
     db.commit()
     db.refresh(db_user_path)
+    
+    # Increment the daily usage count for paths
+    try:
+        # This will increment the paths_generated count and check daily limits
+        increment_usage(db, user_id, "paths")
+        logging.info(f"Incremented daily path usage for user {user_id}")
+    except Exception as e:
+        logging.error(f"Error incrementing path usage for user {user_id}: {str(e)}")
+        # We don't want to fail the operation if the usage tracking fails
+        # The path was already created, so we'll return it
+    
     return db_user_path
 
 def update_user_learning_path_progress(

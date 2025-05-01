@@ -47,6 +47,7 @@ from typing import List, Dict, Any
 from pydantic import BaseModel
 from typing import List
 from app.learning_paths.schemas import GenerateCourseTitleRequest
+from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
 
@@ -232,6 +233,17 @@ async def generate_ai_learning_path(
 ):
     """Generate a learning path using AI based on user interests"""
     try:
+        # Check user's daily usage limit for learning paths
+        # Get current resources
+        resources = get_user_remaining_resources(db, current_user.id)
+        
+        # Check if user has reached their daily limit
+        if resources["paths"]["remaining"] <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Daily limit reached for learning paths. Your limit is {resources['paths']['limit']} paths per day."
+            )
+        
         # Generate learning path with AI
         learning_path_data = await generate_learning_path_with_ai(
             interests=request.interests,
@@ -249,6 +261,9 @@ async def generate_ai_learning_path(
             learning_path_id=learning_path.id
         )
         
+        # Increment user's daily usage for learning paths
+        increment_user_resource_usage(db, current_user.id, "paths")
+        
         return learning_path
     
     except Exception as e:
@@ -256,9 +271,7 @@ async def generate_ai_learning_path(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate learning path: {str(e)}"
-        ) 
-    
-
+        )
 
 @router.post("/generate-learning-courses")
 async def generate_learning_courses(request: GenerateLearningPathRequest):
@@ -297,8 +310,6 @@ async def generate_learning_courses(request: GenerateLearningPathRequest):
         logging.error(f"Failed to generate courses with sections: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate courses with sections")
 
-
-
 @router.post("/generate-course-titles")
 async def generate_course_titles(request: GenerateCourseTitleRequest):
     try:
@@ -313,7 +324,6 @@ async def generate_course_titles(request: GenerateCourseTitleRequest):
     except Exception as e:
         logging.error(f"Failed to generate course titles: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate course titles")
-
 
 @router.post("/generate-sections")
 async def generate_sections_from_titles(request: GenerateDetailsFromOutlineRequest):
