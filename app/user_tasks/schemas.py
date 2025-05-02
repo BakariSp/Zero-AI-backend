@@ -75,4 +75,20 @@ class ShiftTasksRequest(BaseModel):
     """
     user_id: int = Field(..., description="ID of the user whose tasks should be shifted")
     from_date: date = Field(..., description="Date from which tasks should be shifted")
-    days: int = Field(..., description="Number of days to shift tasks by (positive or negative)") 
+    days: int = Field(..., description="Number of days to shift tasks by (positive or negative)")
+
+class CurrentUserDailyTaskCreate(BaseModel):
+    """
+    Schema for creating a task for the current user without requiring user_id.
+    """
+    title: str = Field("Task", description="Title of the task")
+    scheduled_date: date = Field(..., description="Date when this task is scheduled")
+    start_time: Optional[time] = Field(None, description="Optional start time for the task")
+    end_time: Optional[time] = Field(None, description="Optional end time for the task")
+    status: DailyTaskStatusEnum = Field(DailyTaskStatusEnum.TODO, description="Task status (TODO, DONE, SKIPPED)")
+    note: Optional[str] = Field(None, description="Optional user note for this task")
+    # Foreign key fields made optional for standalone tasks
+    card_id: Optional[int] = Field(None, description="ID of the card this task is associated with. Optional for standalone tasks.")
+    section_id: Optional[int] = Field(None, description="ID of the section this task belongs to. Optional for standalone tasks.")
+    course_id: Optional[int] = Field(None, description="ID of the course this task belongs to. Optional for standalone tasks.")
+    learning_path_id: Optional[int] = Field(None, description="ID of the learning path this task belongs to. Optional for standalone tasks.") 

@@ -260,7 +260,7 @@ def get_my_tasks(
 
 @router.post("/me", response_model=List[schemas.DailyTaskResponse])
 def create_my_tasks(
-    task: schemas.DailyTaskCreate,
+    task: schemas.CurrentUserDailyTaskCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -278,12 +278,15 @@ def create_my_tasks(
             scheduled_date=date.today(),
             status="pending"
         )]
-        
-    # Override the user_id to ensure it's the current user
-    task.user_id = current_user.id
+    
+    # Create a DailyTaskCreate instance with the current user's ID
+    task_data = schemas.DailyTaskCreate(
+        user_id=current_user.id,
+        **task.model_dump()
+    )
     
     # Validate card_id if provided
-    if task.card_id is not None and task.card_id == 0:
+    if task_data.card_id is not None and task_data.card_id == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid card_id: Card with ID 0 does not exist. Please provide a valid card_id or omit it for standalone tasks."
@@ -291,7 +294,7 @@ def create_my_tasks(
     
     try:
         # Create the new task
-        new_task = crud.create_daily_task(db, task)
+        new_task = crud.create_daily_task(db, task_data)
         return [new_task]  # Return as a list to match the response model
     except Exception as e:
         # Handle database errors 
