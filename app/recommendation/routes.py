@@ -419,6 +419,19 @@ async def create_learning_path_from_structure(
     assigns it to the user, and schedules background card generation (4 cards per section).
     """
     try:
+        # Check user's daily usage limit for learning paths
+        resources = get_user_remaining_resources(db, current_user.id)
+        
+        # Check if user has reached their daily limit
+        if resources["paths"]["remaining"] <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Daily limit reached for learning paths. Your limit is {resources['paths']['limit']} paths per day."
+            )
+            
+        # Increment user's daily usage for learning paths
+        increment_user_resource_usage(db, current_user.id, "paths")
+        
         # Schedule the entire process (structure saving + card generation)
         task_id = schedule_structured_learning_path_generation(
             background_tasks=background_tasks,

@@ -32,7 +32,8 @@ class LearningAssistantService:
         user_query: str,
         card_id: Optional[int] = None,
         section_id: Optional[int] = None,
-        difficulty_level: str = "intermediate"
+        difficulty_level: str = "intermediate",
+        user_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Process a user question during learning, retrieve context, and generate response with related card
@@ -43,6 +44,7 @@ class LearningAssistantService:
             card_id: ID of the card the user is currently viewing
             section_id: ID of the section the user is currently in
             difficulty_level: Desired difficulty level
+            user_id: ID of the current user (optional)
             
         Returns:
             Dict with answer, related card, and status information
@@ -92,6 +94,17 @@ class LearningAssistantService:
                 course_title=course_title,
                 difficulty_level=difficulty_level
             )
+            
+            # If a related card was generated and there's a user, increment their card usage
+            # This ensures we count card generation even if it's not added to a section yet
+            if response.get("related_card") and user_id:
+                try:
+                    # Increment the user's daily usage for cards
+                    increment_usage(db, user_id, "cards")
+                    logging.info(f"Incremented daily card usage for user {user_id} for generated card")
+                except Exception as e:
+                    logging.error(f"Error incrementing card usage for user {user_id}: {str(e)}")
+                    # We don't want to fail the operation if usage tracking fails
             
             # Structure the response with additional metadata
             result = {

@@ -51,7 +51,8 @@ async def ask_question(
             user_query=request.query,
             card_id=request.card_id,
             section_id=request.section_id,
-            difficulty_level=request.difficulty_level
+            difficulty_level=request.difficulty_level,
+            user_id=user_id
         )
         
         return result
