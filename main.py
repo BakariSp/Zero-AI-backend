@@ -99,8 +99,8 @@ async def options_middleware(request: Request, call_next):
 app.add_middleware(
     SessionMiddleware, 
     secret_key=os.getenv("SESSION_SECRET_KEY", "your-secret-key-here"),  # Use environment variable
-    max_age=3600,  # Session lifetime in seconds
-    same_site="lax",
+    max_age=14400,  # Extend session lifetime to 4 hours
+    same_site="lax",  # Allow cross-site cookies for OAuth redirects
     session_cookie="zero_session",  # Use a custom cookie name
     https_only=os.getenv("ENVIRONMENT", "development").lower() == "production",  # Secure in production
 )
@@ -108,7 +108,7 @@ app.add_middleware(
 # Log session configuration
 log.info(f"Session middleware configured with:")
 log.info(f"- Cookie name: zero_session")
-log.info(f"- Max age: 3600 seconds")
+log.info(f"- Max age: 14400 seconds (4 hours)")
 log.info(f"- Same site: lax")
 log.info(f"- HTTPS only: {os.getenv('ENVIRONMENT', 'development').lower() == 'production'}")
 log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")

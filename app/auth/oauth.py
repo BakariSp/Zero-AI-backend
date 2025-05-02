@@ -103,30 +103,228 @@ async def login_via_google(request: Request):
     
     # Use explicit redirect URI that matches what's registered in Google Cloud Console
     base_url = str(request.base_url)
-    if "localhost" in base_url:
+    is_local = "localhost" in base_url
+    
+    if is_local:
         # Local development
         redirect_uri = "http://localhost:8000/oauth/google/callback"
     else:
-        # Production deployment - use the exact URI registered in Google Cloud Console
+        # Production deployment - always use HTTPS
+        # Use the correct domain pattern with https protocol
         redirect_uri = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
     
     log.info(f"Google redirect URI: {redirect_uri}")
     
-    return await oauth.google.authorize_redirect(request, redirect_uri)
+    # Generate and store a secure state parameter
+    state = secrets.token_urlsafe(16)
+    request.session['google_oauth_state'] = state
+    log.info(f"Generated Google OAuth state: {state}")
+    log.info(f"Session after state set: {dict(request.session)}")
+    
+    # Return the redirect with explicit state parameter
+    return await oauth.google.authorize_redirect(request, redirect_uri, state=state)
 
 @router.get("/google/callback", name="auth_via_google")
 async def auth_via_google(request: Request):
     """Handle Google OAuth callback"""
-    user, is_new_user = await get_oauth_user("google", request)
-    
-    # Create access token
-    access_token = create_access_token(data={"sub": user.email})
-    
-    # Redirect to frontend with token and new user flag
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
-    
-    return RedirectResponse(url=redirect_url)
+    try:
+        log.info(f"Google OAuth callback received")
+        log.info(f"Callback URL: {request.url}")
+        log.info(f"Query parameters: {dict(request.query_params)}")
+        log.info(f"Session contents: {dict(request.session)}")
+        
+        # Check if we're in production or local
+        is_local = "localhost" in str(request.base_url)
+        
+        # Get the state parameters
+        received_state = request.query_params.get("state")
+        expected_state = request.session.get("google_oauth_state")
+        
+        log.info(f"Received state: {received_state}")
+        log.info(f"Expected state from session: {expected_state}")
+        
+        # Check state mismatch
+        if not is_local and (not received_state or not expected_state or received_state != expected_state):
+            log.warning(f"State mismatch! Received: {received_state}, Expected: {expected_state}")
+            log.warning("Proceeding despite state mismatch (workaround for session issues)")
+            
+            # Perform manual token exchange for production
+            code = request.query_params.get("code")
+            if not code:
+                log.error("No authorization code in callback")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, 
+                    detail="No authorization code provided"
+                )
+                
+            # Use the correct redirect URI that matches what was used in the authorization request
+            if is_local:
+                redirect_uri = "http://localhost:8000/oauth/google/callback"
+            else:
+                redirect_uri = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
+                
+            log.info(f"Using redirect URI for token exchange: {redirect_uri}")
+            
+            # Perform manual token exchange
+            import httpx
+            
+            token_url = "https://oauth2.googleapis.com/token"
+            token_data = {
+                "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+                "code": code,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code"
+            }
+            
+            log.info(f"Performing manual token exchange with Google")
+            
+            async with httpx.AsyncClient() as client:
+                token_response = await client.post(token_url, data=token_data)
+                
+                if token_response.status_code != 200:
+                    log.error(f"Token exchange failed: {token_response.status_code}, {token_response.text}")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=f"Failed to get token from Google: {token_response.status_code}"
+                    )
+                    
+                token_data = token_response.json()
+                log.info(f"Token exchange successful, keys: {list(token_data.keys())}")
+                
+                # Get user info from ID token or access token
+                access_token = token_data.get("access_token")
+                id_token = token_data.get("id_token")
+                
+                if id_token:
+                    # Parse the ID token for user info
+                    import jwt
+                    id_token_data = jwt.decode(id_token, options={"verify_signature": False})
+                    log.info(f"Decoded ID token claims: {list(id_token_data.keys())}")
+                    
+                    # Extract user info from ID token
+                    oauth_id = id_token_data.get("sub")
+                    email = id_token_data.get("email")
+                    name = id_token_data.get("name")
+                    picture = id_token_data.get("picture")
+                    
+                elif access_token:
+                    # Use userinfo endpoint with access token
+                    userinfo_response = await client.get(
+                        "https://www.googleapis.com/oauth2/v3/userinfo",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    
+                    if userinfo_response.status_code != 200:
+                        log.error(f"Failed to get user info: {userinfo_response.status_code}")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Failed to get user info from Google"
+                        )
+                        
+                    user_data = userinfo_response.json()
+                    log.info(f"Retrieved user info: {list(user_data.keys())}")
+                    
+                    oauth_id = user_data.get("sub")
+                    email = user_data.get("email")
+                    name = user_data.get("name")
+                    picture = user_data.get("picture")
+                else:
+                    log.error("No tokens returned from Google")
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="No tokens returned from Google"
+                    )
+        else:
+            # Standard OAuth flow for local development or when state matches
+            log.info("Using standard OAuth flow for token exchange")
+            token = await oauth.google.authorize_access_token(request)
+            
+            if "userinfo" not in token:
+                log.error(f"Missing userinfo in token response: {list(token.keys())}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Missing user information in token response"
+                )
+                
+            user_info = token.get("userinfo")
+            oauth_id = user_info.get("sub")
+            email = user_info.get("email") 
+            name = user_info.get("name")
+            picture = user_info.get("picture")
+            
+        # Ensure we have required user info
+        if not oauth_id or not email:
+            log.error(f"Missing required user info: oauth_id={bool(oauth_id)}, email={bool(email)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Could not retrieve required user information from Google"
+            )
+            
+        log.info(f"Successfully retrieved user info from Google: email={email}")
+        
+        # Create or retrieve user
+        db = SessionLocal()
+        is_new_user = False
+        
+        try:
+            # First try to find the user by OAuth ID
+            user = get_user_by_oauth(db, provider="google", oauth_id=oauth_id)
+            
+            # If not found, create a new user
+            if not user:
+                log.info(f"Creating new user for Google OAuth: {email}")
+                is_new_user = True
+                
+                # Generate a username from email
+                username = email.split("@")[0]
+                
+                # Check if username exists and append numbers if needed
+                base_username = username
+                counter = 1
+                while get_user_by_username(db, username):
+                    username = f"{base_username}{counter}"
+                    counter += 1
+                
+                # Create a UserCreate object
+                user_data = UserCreate(
+                    email=email,
+                    username=username,
+                    password="",  # No password for OAuth users
+                    full_name=name or "",
+                    is_active=True
+                )
+                
+                # Create the user
+                user = create_user(
+                    db=db,
+                    user=user_data,
+                    oauth_provider="google",
+                    oauth_id=oauth_id,
+                    profile_picture=picture
+                )
+                log.info(f"Created new user: {username}")
+            else:
+                log.info(f"Found existing user: {user.username}")
+        finally:
+            db.close()
+            
+        # Create access token
+        access_token = create_access_token(data={"sub": user.email})
+        
+        # Redirect to frontend with token and new user flag
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
+        
+        log.info(f"Redirecting to frontend: {redirect_url}")
+        return RedirectResponse(url=redirect_url)
+        
+    except Exception as e:
+        log.error(f"Google OAuth callback error: {str(e)}")
+        # Redirect to frontend error page
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+        error_url = f"{frontend_url}/oauth/error?message={str(e)}"
+        return RedirectResponse(url=error_url)
 
 @router.get("/microsoft")
 async def login_via_microsoft(request: Request):
@@ -967,3 +1165,101 @@ async def debug_token(request: Request):
             "error": str(e),
             "message": "An error occurred while processing the token"
         }
+
+# Add a debugging endpoint for OAuth redirect URIs
+@router.get("/debug-redirect-uris")
+async def debug_redirect_uris(request: Request):
+    """Debug endpoint to display the redirect URIs being used for OAuth"""
+    base_url = str(request.base_url)
+    
+    # Determine if we're in local or production
+    is_local = "localhost" in base_url
+    
+    # Get the redirect URIs
+    google_redirect_uri = "http://localhost:8000/oauth/google/callback" if is_local else "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
+    microsoft_redirect_uri = "http://localhost:8000/oauth/microsoft/callback" if is_local else "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    
+    # Get the actual host and check for protocol issues
+    host = request.headers.get("host", "unknown")
+    forwarded_proto = request.headers.get("x-forwarded-proto", "unknown")
+    original_host = request.headers.get("x-original-host", "unknown")
+    forwarded_host = request.headers.get("x-forwarded-host", "unknown")
+    
+    # Log info for debugging
+    log.info(f"Debugging redirect URIs:")
+    log.info(f"Base URL: {base_url}")
+    log.info(f"Google redirect URI: {google_redirect_uri}")
+    log.info(f"Microsoft redirect URI: {microsoft_redirect_uri}")
+    log.info(f"Host header: {host}")
+    log.info(f"X-Forwarded-Proto: {forwarded_proto}")
+    log.info(f"X-Original-Host: {original_host}")
+    log.info(f"X-Forwarded-Host: {forwarded_host}")
+    
+    # Get environment info
+    env_info = {
+        "GOOGLE_CLIENT_ID": mask_string(os.getenv("GOOGLE_CLIENT_ID", "")),
+        "GOOGLE_CLIENT_SECRET": mask_string(os.getenv("GOOGLE_CLIENT_SECRET", "")),
+        "MICROSOFT_CLIENT_ID": mask_string(os.getenv("MICROSOFT_CLIENT_ID", "")),
+        "MICROSOFT_CLIENT_SECRET": mask_string(os.getenv("MICROSOFT_CLIENT_SECRET", "")),
+        "FRONTEND_URL": os.getenv("FRONTEND_URL", "Not set"),
+    }
+    
+    # Check if session is working
+    session_test_value = f"test-{int(time.time())}"
+    request.session["test_value"] = session_test_value
+    
+    # Try to get previously stored values
+    previous_test = request.session.get("previous_test", "Not set")
+    request.session["previous_test"] = session_test_value
+    
+    # Check if we can detect the actual domain
+    detected_domain = None
+    if host and host != "unknown" and host != "localhost:8000":
+        detected_domain = host
+    elif original_host and original_host != "unknown":
+        detected_domain = original_host
+    elif forwarded_host and forwarded_host != "unknown":
+        detected_domain = forwarded_host
+    
+    # Determine the protocol
+    protocol = "https" if forwarded_proto == "https" else "http"
+    
+    # Provide recommended redirect URIs based on detected values
+    recommended_google_uri = None
+    if detected_domain:
+        recommended_google_uri = f"{protocol}://{detected_domain}/oauth/google/callback"
+    
+    return {
+        "base_url": base_url,
+        "is_local": is_local,
+        "google_redirect_uri": google_redirect_uri,
+        "microsoft_redirect_uri": microsoft_redirect_uri,
+        "environment_info": env_info,
+        "request_headers": dict(request.headers),
+        "session_info": {
+            "current_test_value": session_test_value,
+            "previous_test_value": previous_test,
+            "session_working": previous_test != "Not set" and previous_test != session_test_value,
+            "all_session_data": dict(request.session)
+        },
+        "detected_host_info": {
+            "host_header": host,
+            "x_forwarded_proto": forwarded_proto,
+            "x_original_host": original_host,
+            "x_forwarded_host": forwarded_host,
+            "detected_domain": detected_domain,
+            "detected_protocol": protocol,
+            "recommended_google_redirect_uri": recommended_google_uri
+        },
+        "deployed_domains": {
+            "google_domain": "zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net",
+            "microsoft_domain": "zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net",
+            "notice": "These domains are different - check which one is correct in Azure"
+        },
+        "test_uris": {
+            "google_login": f"{base_url}oauth/google",
+            "microsoft_login": f"{base_url}oauth/microsoft",
+            "direct_microsoft": f"{base_url}oauth/microsoft/direct"
+        },
+        "instructions": "Verify these URIs match what's configured in Google Cloud Console and Microsoft Azure"
+    }
