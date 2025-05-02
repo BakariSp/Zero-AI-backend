@@ -36,8 +36,25 @@ GOOGLE_PROD_CALLBACK = f"{PRODUCTION_BASE_URL}{GOOGLE_CALLBACK_PATH}"
 MICROSOFT_LOCAL_CALLBACK = f"{LOCAL_BASE_URL}{MICROSOFT_CALLBACK_PATH}"
 MICROSOFT_PROD_CALLBACK = f"{PRODUCTION_BASE_URL}{MICROSOFT_PROD_CALLBACK_PATH}"
 
-# Frontend URL for redirecting after authentication
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# Frontend URLs for redirecting after authentication
+LOCAL_FRONTEND_URL = "http://localhost:3000"
+PRODUCTION_FRONTEND_URL = "https://learnfromzero.app"  # Update this to your actual production frontend URL
+
+# Use environment variable if set, otherwise determine based on deployment environment
+env_frontend_url = os.getenv("FRONTEND_URL")
+# Detect if we're in production based on known environment clues
+is_production_env = os.getenv("ENVIRONMENT", "").lower() == "production" or os.getenv("ASPNETCORE_ENVIRONMENT", "").lower() == "production"
+
+# Choose the frontend URL based on environment settings
+if env_frontend_url:
+    # If explicitly set in environment, use that
+    FRONTEND_URL = env_frontend_url
+elif is_production_env or 'azure' in PRODUCTION_BASE_URL:
+    # If we're in production environment, use production frontend URL
+    FRONTEND_URL = PRODUCTION_FRONTEND_URL
+else:
+    # Default to local frontend URL
+    FRONTEND_URL = LOCAL_FRONTEND_URL
 
 # Log centralized URL configuration
 log.info(f"OAuth URL configuration:")
@@ -46,6 +63,9 @@ log.info(f"- Google production callback: {GOOGLE_PROD_CALLBACK}")
 log.info(f"- Microsoft local callback: {MICROSOFT_LOCAL_CALLBACK}")
 log.info(f"- Microsoft production callback: {MICROSOFT_PROD_CALLBACK}")
 log.info(f"- Frontend URL: {FRONTEND_URL}")
+log.info(f"- Frontend URL source: {'Environment variable' if env_frontend_url else 'Auto-detected based on environment'}")
+log.info(f"- Is production environment: {is_production_env}")
+log.info(f"- Available frontend URLs: Local={LOCAL_FRONTEND_URL}, Production={PRODUCTION_FRONTEND_URL}")
 
 # Load environment variables directly from os.environ for more reliability
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
@@ -1205,6 +1225,8 @@ async def debug_redirect_uris(request: Request):
         "MICROSOFT_CLIENT_ID": mask_string(MICROSOFT_CLIENT_ID),
         "MICROSOFT_CLIENT_SECRET": mask_string(MICROSOFT_CLIENT_SECRET),
         "FRONTEND_URL": FRONTEND_URL,
+        "ENVIRONMENT": os.getenv("ENVIRONMENT", "Not set"),
+        "ASPNETCORE_ENVIRONMENT": os.getenv("ASPNETCORE_ENVIRONMENT", "Not set"),
     }
     
     # Check if session is working
@@ -1249,6 +1271,14 @@ async def debug_redirect_uris(request: Request):
             "microsoft_local_callback": MICROSOFT_LOCAL_CALLBACK,
             "microsoft_prod_callback": MICROSOFT_PROD_CALLBACK
         },
+        "frontend_url_config": {
+            "current_frontend_url": FRONTEND_URL,
+            "local_frontend_url": LOCAL_FRONTEND_URL,
+            "production_frontend_url": PRODUCTION_FRONTEND_URL,
+            "env_frontend_url": env_frontend_url,
+            "is_production_environment": is_production_env,
+            "frontend_url_source": "Environment variable" if env_frontend_url else "Auto-detected based on environment"
+        },
         "active_redirect_uris": {
             "google": google_redirect_uri,
             "microsoft": microsoft_redirect_uri
@@ -1277,7 +1307,16 @@ async def debug_redirect_uris(request: Request):
         "test_uris": {
             "google_login": f"{base_url}oauth/google",
             "microsoft_login": f"{base_url}oauth/microsoft",
-            "direct_microsoft": f"{base_url}oauth/microsoft/direct"
+            "direct_microsoft": f"{base_url}oauth/microsoft/direct",
+            "frontend_callback_url": f"{FRONTEND_URL}/oauth/callback?token=TEST_TOKEN&is_new_user=false"
         },
         "instructions": "Verify these URIs match what's configured in Google Cloud Console and Microsoft Azure"
     }
+
+# Add a test endpoint to check frontend URL redirect
+@router.get("/test-frontend-redirect")
+async def test_frontend_redirect(request: Request):
+    """Test endpoint that redirects to the frontend URL"""
+    log.info(f"Testing frontend URL redirect to: {FRONTEND_URL}")
+    redirect_url = f"{FRONTEND_URL}/oauth/callback?test=true&from=backend"
+    return RedirectResponse(url=redirect_url)
