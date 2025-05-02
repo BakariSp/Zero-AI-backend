@@ -19,6 +19,34 @@ log = logging.getLogger(__name__)
 # Create router
 router = APIRouter()
 
+# Centralized OAuth configuration
+# Base URLs - determine the correct production domain
+LOCAL_BASE_URL = "http://localhost:8000"
+# Use the corrected production domain (based on Microsoft which is working)
+PRODUCTION_BASE_URL = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net"
+
+# OAuth callback paths
+GOOGLE_CALLBACK_PATH = "/oauth/google/callback"
+MICROSOFT_CALLBACK_PATH = "/oauth/microsoft/callback"
+MICROSOFT_PROD_CALLBACK_PATH = "/auth/login/aad/callback"  # Special path for Microsoft in production
+
+# Full callback URLs
+GOOGLE_LOCAL_CALLBACK = f"{LOCAL_BASE_URL}{GOOGLE_CALLBACK_PATH}"
+GOOGLE_PROD_CALLBACK = f"{PRODUCTION_BASE_URL}{GOOGLE_CALLBACK_PATH}"
+MICROSOFT_LOCAL_CALLBACK = f"{LOCAL_BASE_URL}{MICROSOFT_CALLBACK_PATH}"
+MICROSOFT_PROD_CALLBACK = f"{PRODUCTION_BASE_URL}{MICROSOFT_PROD_CALLBACK_PATH}"
+
+# Frontend URL for redirecting after authentication
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Log centralized URL configuration
+log.info(f"OAuth URL configuration:")
+log.info(f"- Google local callback: {GOOGLE_LOCAL_CALLBACK}")
+log.info(f"- Google production callback: {GOOGLE_PROD_CALLBACK}")
+log.info(f"- Microsoft local callback: {MICROSOFT_LOCAL_CALLBACK}")
+log.info(f"- Microsoft production callback: {MICROSOFT_PROD_CALLBACK}")
+log.info(f"- Frontend URL: {FRONTEND_URL}")
+
 # Load environment variables directly from os.environ for more reliability
 MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID", "")
 MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET", "")
@@ -101,17 +129,12 @@ async def login_via_google(request: Request):
     except Exception as e:
         log.error(f"Error accessing Google OAuth client details: {str(e)}")
     
-    # Use explicit redirect URI that matches what's registered in Google Cloud Console
+    # Use explicit redirect URI from central configuration
     base_url = str(request.base_url)
     is_local = "localhost" in base_url
     
-    if is_local:
-        # Local development
-        redirect_uri = "http://localhost:8000/oauth/google/callback"
-    else:
-        # Production deployment - always use HTTPS
-        # Use the correct domain pattern with https protocol
-        redirect_uri = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
+    # Use the appropriate callback URL based on environment
+    redirect_uri = GOOGLE_LOCAL_CALLBACK if is_local else GOOGLE_PROD_CALLBACK
     
     log.info(f"Google redirect URI: {redirect_uri}")
     
@@ -157,11 +180,8 @@ async def auth_via_google(request: Request):
                     detail="No authorization code provided"
                 )
                 
-            # Use the correct redirect URI that matches what was used in the authorization request
-            if is_local:
-                redirect_uri = "http://localhost:8000/oauth/google/callback"
-            else:
-                redirect_uri = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
+            # Use the correct redirect URI from central configuration
+            redirect_uri = GOOGLE_LOCAL_CALLBACK if is_local else GOOGLE_PROD_CALLBACK
                 
             log.info(f"Using redirect URI for token exchange: {redirect_uri}")
             
@@ -170,8 +190,8 @@ async def auth_via_google(request: Request):
             
             token_url = "https://oauth2.googleapis.com/token"
             token_data = {
-                "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
-                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
                 "code": code,
                 "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code"
@@ -313,8 +333,7 @@ async def auth_via_google(request: Request):
         access_token = create_access_token(data={"sub": user.email})
         
         # Redirect to frontend with token and new user flag
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
+        redirect_url = f"{FRONTEND_URL}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
         
         log.info(f"Redirecting to frontend: {redirect_url}")
         return RedirectResponse(url=redirect_url)
@@ -322,16 +341,15 @@ async def auth_via_google(request: Request):
     except Exception as e:
         log.error(f"Google OAuth callback error: {str(e)}")
         # Redirect to frontend error page
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        error_url = f"{frontend_url}/oauth/error?message={str(e)}"
+        error_url = f"{FRONTEND_URL}/oauth/error?message={str(e)}"
         return RedirectResponse(url=error_url)
 
 @router.get("/microsoft")
 async def login_via_microsoft(request: Request):
     """Initiate Microsoft OAuth login flow"""
     # Get fresh environment variables to ensure we have the latest values
-    fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
-    fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+    fresh_client_id = MICROSOFT_CLIENT_ID
+    fresh_client_secret = MICROSOFT_CLIENT_SECRET
     
     # Log the actual client ID being used (partially masked)
     if fresh_client_id:
@@ -360,17 +378,13 @@ async def login_via_microsoft(request: Request):
     # Get debug param if present
     debug_mode = request.query_params.get('debug', 'false').lower() == 'true'
     
-    # Use the exact redirect URI that's registered in Azure
-    # Instead of dynamically generating it
+    # Use the exact redirect URI from central configuration
     base_url = str(request.base_url)
     log.info(f"Base URL: {base_url}")
     
-    if "localhost" in base_url:
-        # Local development
-        redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
-    else:
-        # Production deployment
-        redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    # Use the appropriate callback URL based on environment
+    is_local = "localhost" in base_url
+    redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
     
     log.info(f"Microsoft redirect URI: {redirect_uri}")
     
@@ -452,16 +466,9 @@ async def auth_via_microsoft(request: Request):
                 detail="Missing authorization code from Microsoft"
             )
         
-        # Get fresh credentials
-        fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
-        fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
-        
-        # Get the appropriate redirect URI - must match what was used in the initial request
-        base_url = str(request.base_url)
-        if "localhost" in base_url:
-            redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
-        else:
-            redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+        # Use the appropriate callback URL based on environment
+        is_local = "localhost" in str(request.base_url)
+        redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
         
         log.info(f"Using redirect URI: {redirect_uri}")
             
@@ -478,8 +485,8 @@ async def auth_via_microsoft(request: Request):
         
         # Create form data for token exchange
         token_data = {
-            "client_id": fresh_client_id,
-            "client_secret": fresh_client_secret,
+            "client_id": MICROSOFT_CLIENT_ID,
+            "client_secret": MICROSOFT_CLIENT_SECRET,
             "code": code,
             "redirect_uri": redirect_uri,
             "grant_type": "authorization_code",
@@ -646,8 +653,7 @@ async def auth_via_microsoft(request: Request):
             access_token = create_access_token(data={"sub": user.email})
             
             # Redirect to frontend with token and new user flag
-            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-            redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
+            redirect_url = f"{FRONTEND_URL}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
             
             log.info(f"Redirecting to frontend: {redirect_url}")
             return RedirectResponse(url=redirect_url)
@@ -655,8 +661,7 @@ async def auth_via_microsoft(request: Request):
     except Exception as e:
         log.error(f"Microsoft callback error: {str(e)}")
         # Redirect to frontend error page
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        error_url = f"{frontend_url}/oauth/error?message={str(e)}"
+        error_url = f"{FRONTEND_URL}/oauth/error?message={str(e)}"
         return RedirectResponse(url=error_url)
 
 # Add additional route for production Azure redirect URI
@@ -678,8 +683,7 @@ async def auth_via_microsoft_prod(request: Request):
     # Check if we have the required parameters
     if not code:
         log.error("Missing code parameter in production callback")
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-        error_url = f"{frontend_url}/oauth/error?message=Missing+code+parameter"
+        error_url = f"{FRONTEND_URL}/oauth/error?message=Missing+code+parameter"
         return RedirectResponse(url=error_url)
         
     # Just forward to the standard handler
@@ -691,19 +695,16 @@ async def test_microsoft_oauth(request: Request):
     """Test endpoint for Microsoft OAuth configuration"""
     try:
         # Check environment variables directly
-        raw_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
-        raw_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+        raw_client_id = MICROSOFT_CLIENT_ID
+        raw_client_secret = MICROSOFT_CLIENT_SECRET
         
         # Check if we have the required credentials
         client_id_ok = bool(raw_client_id)
         client_secret_ok = bool(raw_client_secret)
         
-        # Create the redirect URI the same way as the main endpoint
-        base_url = str(request.base_url)
-        if "localhost" in base_url:
-            redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
-        else:
-            redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+        # Get redirect URI from central configuration
+        is_local = "localhost" in str(request.base_url)
+        redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
         
         # Check if the OAuth client is configured
         oauth_client_ok = hasattr(oauth, "microsoft") and oauth.microsoft is not None
@@ -736,12 +737,12 @@ async def test_microsoft_oauth(request: Request):
         env_vars = {
             "MICROSOFT_CLIENT_ID": mask_string(raw_client_id),
             "MICROSOFT_CLIENT_SECRET": mask_string(raw_client_secret),
-            "FRONTEND_URL": os.getenv("FRONTEND_URL", "Not set"),
+            "FRONTEND_URL": FRONTEND_URL,
             "JWT_SECRET_KEY": mask_string(os.getenv("JWT_SECRET_KEY", "Not set")),
             "SESSION_SECRET_KEY": mask_string(os.getenv("SESSION_SECRET_KEY", "Not set"))
         }
         
-        # Return diagnostic information
+        # Return diagnostic information with centralized URL config
         return {
             "status": "configuration_test",
             "client_id_available": client_id_ok,
@@ -750,6 +751,14 @@ async def test_microsoft_oauth(request: Request):
             "oauth_client_configured": oauth_client_ok,
             "oauth_client_id": oauth_client_id,
             "oauth_client_dir": dir(oauth.microsoft) if oauth_client_ok else [],
+            "url_configuration": {
+                "local_base_url": LOCAL_BASE_URL,
+                "production_base_url": PRODUCTION_BASE_URL,
+                "google_local_callback": GOOGLE_LOCAL_CALLBACK,
+                "google_prod_callback": GOOGLE_PROD_CALLBACK,
+                "microsoft_local_callback": MICROSOFT_LOCAL_CALLBACK,
+                "microsoft_prod_callback": MICROSOFT_PROD_CALLBACK
+            },
             "redirect_uri": redirect_uri,
             "manual_auth_url": auth_url,
             "environment_vars": env_vars,
@@ -825,8 +834,8 @@ async def get_oauth_user(provider: str, request: Request):
         # For Microsoft, explicitly include client_id to avoid AADSTS900144 error
         if provider == "microsoft":
             # Get fresh credentials
-            fresh_client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
-            fresh_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+            fresh_client_id = MICROSOFT_CLIENT_ID
+            fresh_client_secret = MICROSOFT_CLIENT_SECRET
             
             # Verify we have valid credentials
             if not fresh_client_id or not fresh_client_secret:
@@ -849,12 +858,9 @@ async def get_oauth_user(provider: str, request: Request):
                     detail="Missing code parameter in Microsoft callback"
                 )
                 
-            # Get the appropriate redirect URI
-            base_url = str(request.base_url)
-            if "localhost" in base_url:
-                redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
-            else:
-                redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+            # Get the appropriate redirect URI from central configuration
+            is_local = "localhost" in str(request.base_url)
+            redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
                 
             log.info(f"Using redirect URI for token exchange: {redirect_uri}")
             
@@ -1022,8 +1028,8 @@ async def get_oauth_user(provider: str, request: Request):
 @router.get("/microsoft/direct")
 async def direct_microsoft_login(request: Request):
     """A direct Microsoft login endpoint that builds the URL manually"""
-    # Get fresh environment variables
-    client_id = os.getenv("MICROSOFT_CLIENT_ID", "")
+    # Get client ID from central configuration
+    client_id = MICROSOFT_CLIENT_ID
     
     # Log the actual client ID being used (partially masked)
     if client_id:
@@ -1032,12 +1038,9 @@ async def direct_microsoft_login(request: Request):
     else:
         log.error("Microsoft client ID is empty!")
     
-    # Build the redirect URI
-    base_url = str(request.base_url)
-    if "localhost" in base_url:
-        redirect_uri = "http://localhost:8000/oauth/microsoft/callback"
-    else:
-        redirect_uri = "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    # Use the appropriate callback URL based on environment
+    is_local = "localhost" in str(request.base_url)
+    redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
     
     # Build the authorization URL manually with explicit client ID from environment
     # Include User.Read scope for Microsoft Graph API access
@@ -1175,9 +1178,9 @@ async def debug_redirect_uris(request: Request):
     # Determine if we're in local or production
     is_local = "localhost" in base_url
     
-    # Get the redirect URIs
-    google_redirect_uri = "http://localhost:8000/oauth/google/callback" if is_local else "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
-    microsoft_redirect_uri = "http://localhost:8000/oauth/microsoft/callback" if is_local else "https://zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net/auth/login/aad/callback"
+    # Get the redirect URIs from central configuration
+    google_redirect_uri = GOOGLE_LOCAL_CALLBACK if is_local else GOOGLE_PROD_CALLBACK
+    microsoft_redirect_uri = MICROSOFT_LOCAL_CALLBACK if is_local else MICROSOFT_PROD_CALLBACK
     
     # Get the actual host and check for protocol issues
     host = request.headers.get("host", "unknown")
@@ -1197,11 +1200,11 @@ async def debug_redirect_uris(request: Request):
     
     # Get environment info
     env_info = {
-        "GOOGLE_CLIENT_ID": mask_string(os.getenv("GOOGLE_CLIENT_ID", "")),
-        "GOOGLE_CLIENT_SECRET": mask_string(os.getenv("GOOGLE_CLIENT_SECRET", "")),
-        "MICROSOFT_CLIENT_ID": mask_string(os.getenv("MICROSOFT_CLIENT_ID", "")),
-        "MICROSOFT_CLIENT_SECRET": mask_string(os.getenv("MICROSOFT_CLIENT_SECRET", "")),
-        "FRONTEND_URL": os.getenv("FRONTEND_URL", "Not set"),
+        "GOOGLE_CLIENT_ID": mask_string(GOOGLE_CLIENT_ID),
+        "GOOGLE_CLIENT_SECRET": mask_string(GOOGLE_CLIENT_SECRET),
+        "MICROSOFT_CLIENT_ID": mask_string(MICROSOFT_CLIENT_ID),
+        "MICROSOFT_CLIENT_SECRET": mask_string(MICROSOFT_CLIENT_SECRET),
+        "FRONTEND_URL": FRONTEND_URL,
     }
     
     # Check if session is working
@@ -1227,13 +1230,29 @@ async def debug_redirect_uris(request: Request):
     # Provide recommended redirect URIs based on detected values
     recommended_google_uri = None
     if detected_domain:
-        recommended_google_uri = f"{protocol}://{detected_domain}/oauth/google/callback"
+        recommended_google_uri = f"{protocol}://{detected_domain}{GOOGLE_CALLBACK_PATH}"
+    
+    # Extract domain names from production URLs for comparison
+    google_domain = PRODUCTION_BASE_URL.split("//")[1] if "//" in PRODUCTION_BASE_URL else PRODUCTION_BASE_URL
     
     return {
         "base_url": base_url,
         "is_local": is_local,
-        "google_redirect_uri": google_redirect_uri,
-        "microsoft_redirect_uri": microsoft_redirect_uri,
+        "centralized_url_config": {
+            "local_base_url": LOCAL_BASE_URL,
+            "production_base_url": PRODUCTION_BASE_URL,
+            "google_callback_path": GOOGLE_CALLBACK_PATH,
+            "microsoft_callback_path": MICROSOFT_CALLBACK_PATH,
+            "microsoft_prod_callback_path": MICROSOFT_PROD_CALLBACK_PATH,
+            "google_local_callback": GOOGLE_LOCAL_CALLBACK,
+            "google_prod_callback": GOOGLE_PROD_CALLBACK,
+            "microsoft_local_callback": MICROSOFT_LOCAL_CALLBACK,
+            "microsoft_prod_callback": MICROSOFT_PROD_CALLBACK
+        },
+        "active_redirect_uris": {
+            "google": google_redirect_uri,
+            "microsoft": microsoft_redirect_uri
+        },
         "environment_info": env_info,
         "request_headers": dict(request.headers),
         "session_info": {
@@ -1251,10 +1270,9 @@ async def debug_redirect_uris(request: Request):
             "detected_protocol": protocol,
             "recommended_google_redirect_uri": recommended_google_uri
         },
-        "deployed_domains": {
-            "google_domain": "zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net",
-            "microsoft_domain": "zero-ai-d9e8fshgczgremge.westus-01.azurewebsites.net",
-            "notice": "These domains are different - check which one is correct in Azure"
+        "google_cloud_console_setup": {
+            "authorize_javascript_origins": [LOCAL_BASE_URL, PRODUCTION_BASE_URL],
+            "authorized_redirect_uris": [GOOGLE_LOCAL_CALLBACK, GOOGLE_PROD_CALLBACK]
         },
         "test_uris": {
             "google_login": f"{base_url}oauth/google",
