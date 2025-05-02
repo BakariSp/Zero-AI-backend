@@ -326,51 +326,90 @@ async def auth_via_google(request: Request):
             
         log.info(f"Successfully retrieved user info from Google: email={email}")
         
-        # Create or retrieve user
-        db = SessionLocal()
+        # Create or retrieve user with retry logic for database connection issues
+        max_retries = 3
+        retry_count = 0
+        user = None
         is_new_user = False
         
-        try:
-            # First try to find the user by OAuth ID
-            user = get_user_by_oauth(db, provider="google", oauth_id=oauth_id)
-            
-            # If not found, create a new user
-            if not user:
-                log.info(f"Creating new user for Google OAuth: {email}")
-                is_new_user = True
+        while retry_count < max_retries:
+            db = None
+            try:
+                # Get a database session
+                db = SessionLocal()
                 
-                # Generate a username from email
-                username = email.split("@")[0]
+                # First try to find the user by OAuth ID
+                user = get_user_by_oauth(db, provider="google", oauth_id=oauth_id)
                 
-                # Check if username exists and append numbers if needed
-                base_username = username
-                counter = 1
-                while get_user_by_username(db, username):
-                    username = f"{base_username}{counter}"
-                    counter += 1
+                # If not found, create a new user
+                if not user:
+                    log.info(f"Creating new user for Google OAuth: {email}")
+                    is_new_user = True
+                    
+                    # Generate a username from email
+                    username = email.split("@")[0]
+                    
+                    # Check if username exists and append numbers if needed
+                    base_username = username
+                    counter = 1
+                    while get_user_by_username(db, username):
+                        username = f"{base_username}{counter}"
+                        counter += 1
+                    
+                    # Create a UserCreate object
+                    user_data = UserCreate(
+                        email=email,
+                        username=username,
+                        password="",  # No password for OAuth users
+                        full_name=name or "",
+                        is_active=True
+                    )
+                    
+                    # Create the user
+                    user = create_user(
+                        db=db,
+                        user=user_data,
+                        oauth_provider="google",
+                        oauth_id=oauth_id,
+                        profile_picture=picture
+                    )
+                    log.info(f"Created new user: {username}")
+                else:
+                    log.info(f"Found existing user: {user.username}")
                 
-                # Create a UserCreate object
-                user_data = UserCreate(
-                    email=email,
-                    username=username,
-                    password="",  # No password for OAuth users
-                    full_name=name or "",
-                    is_active=True
-                )
+                # If we got here, the database operation was successful
+                break
                 
-                # Create the user
-                user = create_user(
-                    db=db,
-                    user=user_data,
-                    oauth_provider="google",
-                    oauth_id=oauth_id,
-                    profile_picture=picture
-                )
-                log.info(f"Created new user: {username}")
-            else:
-                log.info(f"Found existing user: {user.username}")
-        finally:
-            db.close()
+            except Exception as e:
+                retry_count += 1
+                log.error(f"Database error on attempt {retry_count}/{max_retries}: {str(e)}")
+                
+                if retry_count >= max_retries:
+                    log.error("Max database retries exceeded, failing")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Database connection error: {str(e)}"
+                    )
+                    
+                # Wait before retrying (exponential backoff)
+                wait_time = 2 ** retry_count  # 2, 4, 8 seconds
+                log.info(f"Waiting {wait_time} seconds before retry...")
+                import asyncio
+                await asyncio.sleep(wait_time)
+                
+            finally:
+                # Always close the database connection
+                if db:
+                    log.info("Closing database connection")
+                    db.close()
+        
+        # At this point we should have a valid user
+        if not user:
+            log.error("Failed to retrieve or create user despite successful retries")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve or create user record"
+            )
             
         # Create access token
         access_token = create_access_token(data={"sub": user.email})
@@ -630,80 +669,120 @@ async def auth_via_microsoft(request: Request):
             from app.models import User
             from app.db import get_db
             
-            db = SessionLocal()
+            # Add retry logic for database operations
+            max_retries = 3
+            retry_count = 0
+            user = None
             is_new_user = False  # Flag to track if this is a new user
             
-            try:
-                # First try to find the user by OAuth ID
-                user = get_user_by_oauth(db, provider="microsoft", oauth_id=oauth_id)
-                
-                # If not found by OAuth ID, try by email
-                if not user:
-                    log.info(f"User not found by OAuth ID {oauth_id}, trying email {email}")
+            while retry_count < max_retries:
+                db = None
+                try:
+                    # Get a database session
+                    db = SessionLocal()
                     
-                    # Check if user exists with this email
-                    user_by_email = db.query(User).filter(User.email == email).first()
+                    # First try to find the user by OAuth ID
+                    user = get_user_by_oauth(db, provider="microsoft", oauth_id=oauth_id)
                     
-                    if user_by_email:
-                        log.info(f"Found existing user by email: {email}")
+                    # If not found by OAuth ID, try by email
+                    if not user:
+                        log.info(f"User not found by OAuth ID {oauth_id}, trying email {email}")
                         
-                        # Check if this user has OAuth info already
-                        if user_by_email.oauth_provider and user_by_email.oauth_id:
-                            log.info(f"User already has OAuth connection: {user_by_email.oauth_provider} / {user_by_email.oauth_id}")
+                        # Check if user exists with this email
+                        user_by_email = db.query(User).filter(User.email == email).first()
+                        
+                        if user_by_email:
+                            log.info(f"Found existing user by email: {email}")
                             
-                            # Update the OAuth ID if it's different but from same provider
-                            if user_by_email.oauth_provider == "microsoft" and user_by_email.oauth_id != oauth_id:
-                                log.info(f"Updating user's Microsoft OAuth ID from {user_by_email.oauth_id} to {oauth_id}")
+                            # Check if this user has OAuth info already
+                            if user_by_email.oauth_provider and user_by_email.oauth_id:
+                                log.info(f"User already has OAuth connection: {user_by_email.oauth_provider} / {user_by_email.oauth_id}")
+                                
+                                # Update the OAuth ID if it's different but from same provider
+                                if user_by_email.oauth_provider == "microsoft" and user_by_email.oauth_id != oauth_id:
+                                    log.info(f"Updating user's Microsoft OAuth ID from {user_by_email.oauth_id} to {oauth_id}")
+                                    user_by_email.oauth_id = oauth_id
+                                    db.commit()
+                            else:
+                                # User exists but doesn't have OAuth info, add it
+                                log.info(f"Adding Microsoft OAuth info to existing user: {email}")
+                                user_by_email.oauth_provider = "microsoft"
                                 user_by_email.oauth_id = oauth_id
                                 db.commit()
-                        else:
-                            # User exists but doesn't have OAuth info, add it
-                            log.info(f"Adding Microsoft OAuth info to existing user: {email}")
-                            user_by_email.oauth_provider = "microsoft"
-                            user_by_email.oauth_id = oauth_id
-                            db.commit()
-                            
-                        # Use this user
-                        user = user_by_email
+                                
+                            # Use this user
+                            user = user_by_email
+                    
+                    # If still not found, create a new user
+                    if not user:
+                        log.info(f"Creating new user for Microsoft OAuth: {email}")
+                        # Set flag for new user
+                        is_new_user = True
+                        
+                        # Generate a username from email
+                        username = email.split("@")[0]
+                        
+                        # Check if username exists and append numbers if needed
+                        base_username = username
+                        counter = 1
+                        while get_user_by_username(db, username):
+                            username = f"{base_username}{counter}"
+                            counter += 1
+                        
+                        # Create a UserCreate object
+                        user_data = UserCreate(
+                            email=email,
+                            username=username,
+                            password="",  # No password for OAuth users
+                            full_name=name or "",
+                            is_active=True
+                        )
+                        
+                        # Create the user
+                        user = create_user(
+                            db=db,
+                            user=user_data,
+                            oauth_provider="microsoft",
+                            oauth_id=oauth_id,
+                            profile_picture=None
+                        )
+                        log.info(f"Created new user: {username}")
+                    else:
+                        log.info(f"Found existing user: {user.username}")
+                    
+                    # If we got here, the database operation was successful
+                    break
+                    
+                except Exception as e:
+                    retry_count += 1
+                    log.error(f"Database error on attempt {retry_count}/{max_retries}: {str(e)}")
+                    
+                    if retry_count >= max_retries:
+                        log.error("Max database retries exceeded, failing")
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"Database connection error: {str(e)}"
+                        )
+                    
+                    # Wait before retrying (exponential backoff)
+                    wait_time = 2 ** retry_count  # 2, 4, 8 seconds
+                    log.info(f"Waiting {wait_time} seconds before retry...")
+                    import asyncio
+                    await asyncio.sleep(wait_time)
                 
-                # If still not found, create a new user
-                if not user:
-                    log.info(f"Creating new user for Microsoft OAuth: {email}")
-                    # Set flag for new user
-                    is_new_user = True
-                    
-                    # Generate a username from email
-                    username = email.split("@")[0]
-                    
-                    # Check if username exists and append numbers if needed
-                    base_username = username
-                    counter = 1
-                    while get_user_by_username(db, username):
-                        username = f"{base_username}{counter}"
-                        counter += 1
-                    
-                    # Create a UserCreate object
-                    user_data = UserCreate(
-                        email=email,
-                        username=username,
-                        password="",  # No password for OAuth users
-                        full_name=name or "",
-                        is_active=True
-                    )
-                    
-                    # Create the user
-                    user = create_user(
-                        db=db,
-                        user=user_data,
-                        oauth_provider="microsoft",
-                        oauth_id=oauth_id,
-                        profile_picture=None
-                    )
-                    log.info(f"Created new user: {username}")
-                else:
-                    log.info(f"Found existing user: {user.username}")
-            finally:
-                db.close()
+                finally:
+                    # Always close the database connection
+                    if db:
+                        log.info("Closing database connection")
+                        db.close()
+            
+            # At this point we should have a valid user
+            if not user:
+                log.error("Failed to retrieve or create user despite successful retries")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to retrieve or create user record"
+                )
                 
             # Create JWT access token for the user
             access_token = create_access_token(data={"sub": user.email})

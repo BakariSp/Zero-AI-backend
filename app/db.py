@@ -3,6 +3,11 @@ import mysql.connector
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import pymysql
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # EXPLICITLY set the username without the server suffix
 DB_USER = "fmqfmvlobx"  # Hardcoded without server suffix
@@ -25,12 +30,23 @@ def get_mysql_connection():
     )
 
 # For SQLAlchemy, create a connection string that works with the same parameters
+# Add connection pooling and timeout settings to prevent "MySQL server has gone away" errors
 engine = create_engine(
     f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
     connect_args={
-        "ssl": {"ca": SSL_CA}
-    }
+        "ssl": {"ca": SSL_CA},
+        # Add connection timeouts
+        "connect_timeout": 60,  # 60 seconds connection timeout
+    },
+    # Add pool settings
+    pool_size=10,  # Number of connections to keep open
+    max_overflow=20,  # Max number of connections to create when pool is full
+    pool_timeout=30,  # Timeout for getting a connection from the pool
+    pool_recycle=3600,  # Recycle connections after 1 hour to avoid stale connections
+    pool_pre_ping=True  # Test connections with a ping before using them
 )
+
+logger.info("SQLAlchemy engine created with connection pooling and timeout settings")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
