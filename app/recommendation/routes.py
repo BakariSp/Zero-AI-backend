@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from fastapi import BackgroundTasks
 import logging
 from pydantic import BaseModel
+import time
+import random
+import base64
+import json
+import hashlib
 
 from app.db import get_db
 from app.models import (
@@ -14,8 +19,16 @@ from app.models import (
     course_section_association,  # Add this import
     CourseSection
 )
-from app.recommendation.schemas import LearningPathResponse, CourseResponse, CardResponse, RecommendationResponse, LearningPathRequest, ChatPromptRequest, LearningPathStructureRequest, TaskCreationResponse, EnhancedTaskStatus
-from app.recommendation.crud import get_recommended_learning_paths, get_recommended_courses, get_recommended_cards
+from app.recommendation.schemas import (
+    LearningPathResponse, CourseResponse, CardResponse, 
+    RecommendationResponse, LearningPathRequest, ChatPromptRequest, 
+    LearningPathStructureRequest, TaskCreationResponse, EnhancedTaskStatus,
+    InterestRecommendationResponse, RecommendationMetadata, SimplifiedLearningPathResponse
+)
+from app.recommendation.crud import (
+    get_recommended_learning_paths, get_recommended_courses, 
+    get_recommended_cards, get_interest_learning_paths, get_random_learning_paths
+)
 from app.services.learning_path_planner import LearningPathPlannerService
 from app.auth.jwt import get_current_active_user
 from app.learning_paths.crud import assign_learning_path_to_user
@@ -427,3 +440,158 @@ async def create_learning_path_from_structure(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to initiate learning path creation."
         )
+
+class InterestPathRequest(BaseModel):
+    """Request for getting interest-based learning path recommendations"""
+    interests: List[str]
+    limit: Optional[int] = 3
+    refresh_token: Optional[str] = None
+    exclude_paths: Optional[List[int]] = None
+
+@router.post("/recommendations/interests", response_model=InterestRecommendationResponse)
+async def get_interest_learning_path_recommendations(
+    request: InterestPathRequest,
+    db: Session = Depends(get_db),
+    current_user: Optional[User] = Depends(get_current_active_user)
+):
+    """
+    Get simplified learning path recommendations based on interests with support for refreshing results.
+    
+    This endpoint:
+    1. Accepts a list of interest IDs
+    2. Returns learning paths recommended for those interests
+    3. Provides a refresh token for getting different results next time
+    4. Can exclude specific learning path IDs
+    
+    The refresh token ensures different results on subsequent calls.
+    Falls back to random learning paths if interests are invalid or empty.
+    Always returns exactly 3 learning paths, filling with random ones if needed.
+    """
+    # Set a fixed target count of 3 paths to return
+    target_count = 3
+    actual_limit = request.limit or target_count
+    
+    # Parse refresh token if provided
+    seed = None
+    if request.refresh_token:
+        try:
+            # Decode the refresh token to get the timestamp and seed
+            token_data = json.loads(base64.b64decode(request.refresh_token.encode()).decode())
+            # We won't use the timestamp for validation, just the seed
+            previous_seed = token_data.get('seed')
+            
+            # Generate a new seed based on the previous one
+            if previous_seed:
+                seed = (previous_seed * 1.5 + int(time.time())) % 10000
+        except Exception as e:
+            logging.warning(f"Error parsing refresh token: {e}")
+            # Continue with a new seed if token parsing fails
+    
+    # If no valid seed from refresh token, generate a new one
+    if seed is None:
+        seed = random.random() * 10000
+    
+    # Check if interests is valid
+    recommendations = []
+    used_fallback = False
+    filled_with_random = False
+    
+    try:
+        # If interests is empty or None, use fallback
+        if not request.interests:
+            logging.info("No interests provided, using random fallback paths")
+            recommendations = get_random_learning_paths(
+                db=db,
+                limit=actual_limit,
+                exclude_ids=request.exclude_paths
+            )
+            used_fallback = True
+        else:
+            # Try to get recommendations based on interests
+            recommendations = get_interest_learning_paths(
+                db=db,
+                interests=request.interests,
+                limit=actual_limit,
+                seed=seed,
+                exclude_ids=request.exclude_paths
+            )
+            
+            # If no recommendations found, use fallback
+            if not recommendations:
+                logging.info(f"No recommendations found for interests: {request.interests}, using random fallback paths")
+                recommendations = get_random_learning_paths(
+                    db=db,
+                    limit=actual_limit,
+                    exclude_ids=request.exclude_paths
+                )
+                used_fallback = True
+    except Exception as e:
+        # If any error occurs, use fallback
+        logging.error(f"Error getting interest recommendations: {e}", exc_info=True)
+        recommendations = get_random_learning_paths(
+            db=db,
+            limit=actual_limit,
+            exclude_ids=request.exclude_paths
+        )
+        used_fallback = True
+    
+    # Check if we need to fill with random paths to reach target_count (3)
+    current_path_count = len(recommendations)
+    
+    if current_path_count < target_count:
+        logging.info(f"Only found {current_path_count} paths, filling with {target_count - current_path_count} random paths")
+        
+        # Get IDs of paths we already have to exclude them
+        existing_path_ids = [rec["learning_path"].id for rec in recommendations]
+        exclude_ids = existing_path_ids
+        
+        # Also exclude any explicitly requested excludes 
+        if request.exclude_paths:
+            exclude_ids = list(set(exclude_ids + request.exclude_paths))
+        
+        # Fill with random paths
+        random_paths = get_random_learning_paths(
+            db=db,
+            limit=target_count - current_path_count,
+            exclude_ids=exclude_ids
+        )
+        
+        recommendations.extend(random_paths)
+        filled_with_random = True
+    
+    # Ensure we only return exactly 3 paths (in case we got more than needed)
+    recommendations = recommendations[:target_count]
+    
+    # Map learning path IDs to metadata
+    metadata = {}
+    learning_paths = []
+    
+    for rec in recommendations:
+        learning_path = rec["learning_path"]
+        learning_paths.append(learning_path)
+        
+        # Store metadata for this learning path
+        metadata[learning_path.id] = RecommendationMetadata(
+            interest_id=rec["recommendation"]["interest_id"],
+            score=rec["recommendation"]["score"],
+            priority=rec["recommendation"]["priority"],
+            tags=rec["recommendation"]["tags"] if "tags" in rec["recommendation"] and rec["recommendation"]["tags"] else []
+        )
+    
+    # Generate a refresh token for the next request
+    next_seed = (seed * 1.3 + int(time.time())) % 10000
+    refresh_token = base64.b64encode(
+        json.dumps({
+            "timestamp": int(time.time()),
+            "seed": next_seed,
+            "used_fallback": used_fallback,
+            "filled_with_random": filled_with_random
+        }).encode()
+    ).decode()
+    
+    # Return the response with simplified learning path data
+    return InterestRecommendationResponse(
+        learning_paths=[SimplifiedLearningPathResponse.from_orm(path) for path in learning_paths],
+        metadata=metadata,
+        refresh_token=refresh_token
+    )

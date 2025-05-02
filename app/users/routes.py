@@ -31,6 +31,8 @@ from app.users.crud import (
 from app.models import User
 from app.users import schemas
 from app.user_daily_usage.crud import get_or_create_daily_usage
+from app.users import crud
+from app.users.schemas import UserCreate, UserResponse, UserUpdate, UserInterests, TermsAcceptanceCreate, TermsAcceptanceResponse
 
 router = APIRouter()
 
@@ -330,3 +332,66 @@ async def update_user_subscription(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update subscription: {str(e)}"
         ) 
+
+# Terms Acceptance Routes
+@router.post("/terms/accept", response_model=TermsAcceptanceResponse, status_code=status.HTTP_201_CREATED)
+def accept_terms(
+    terms: TermsAcceptanceCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Record a user's acceptance of terms and conditions.
+    This endpoint records when a user accepts the terms, which version they accepted,
+    and optionally their IP address for audit purposes.
+    """
+    # If IP address is not provided in the request, get it from the request
+    if not terms.ip_address:
+        # Get client IP from request
+        terms.ip_address = request.client.host
+    
+    return crud.create_terms_acceptance(
+        db=db,
+        user_id=current_user.id,
+        terms_version=terms.terms_version,
+        ip_address=terms.ip_address
+    )
+
+@router.get("/terms/history", response_model=List[TermsAcceptanceResponse])
+def get_terms_acceptance_history(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Get the history of all terms acceptances for the current user
+    """
+    return crud.get_user_terms_acceptances(
+        db=db,
+        user_id=current_user.id,
+        skip=skip,
+        limit=limit
+    )
+
+@router.get("/terms/status/{terms_version}", response_model=dict)
+def check_terms_status(
+    terms_version: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Check if the user has accepted a specific version of the terms
+    """
+    has_accepted = crud.has_accepted_terms(
+        db=db,
+        user_id=current_user.id,
+        terms_version=terms_version
+    )
+    
+    return {
+        "user_id": current_user.id,
+        "terms_version": terms_version,
+        "has_accepted": has_accepted
+    } 

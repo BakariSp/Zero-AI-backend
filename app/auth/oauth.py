@@ -101,8 +101,15 @@ async def login_via_google(request: Request):
     except Exception as e:
         log.error(f"Error accessing Google OAuth client details: {str(e)}")
     
-    # Redirect URI is crucial - make sure it's explicitly set and matches Azure config
-    redirect_uri = str(request.url_for('auth_via_google'))
+    # Use explicit redirect URI that matches what's registered in Google Cloud Console
+    base_url = str(request.base_url)
+    if "localhost" in base_url:
+        # Local development
+        redirect_uri = "http://localhost:8000/oauth/google/callback"
+    else:
+        # Production deployment - use the exact URI registered in Google Cloud Console
+        redirect_uri = "https://zero-ai-d9e8f5hgczgremge.westus-01.azurewebsites.net/oauth/google/callback"
+    
     log.info(f"Google redirect URI: {redirect_uri}")
     
     return await oauth.google.authorize_redirect(request, redirect_uri)
@@ -110,14 +117,14 @@ async def login_via_google(request: Request):
 @router.get("/google/callback", name="auth_via_google")
 async def auth_via_google(request: Request):
     """Handle Google OAuth callback"""
-    user = await get_oauth_user("google", request)
+    user, is_new_user = await get_oauth_user("google", request)
     
     # Create access token
     access_token = create_access_token(data={"sub": user.email})
     
-    # Redirect to frontend with token
+    # Redirect to frontend with token and new user flag
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{frontend_url}/oauth/callback?token={access_token}"
+    redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
     
     return RedirectResponse(url=redirect_url)
 
@@ -363,6 +370,8 @@ async def auth_via_microsoft(request: Request):
             from app.db import get_db
             
             db = SessionLocal()
+            is_new_user = False  # Flag to track if this is a new user
+            
             try:
                 # First try to find the user by OAuth ID
                 user = get_user_by_oauth(db, provider="microsoft", oauth_id=oauth_id)
@@ -399,6 +408,9 @@ async def auth_via_microsoft(request: Request):
                 # If still not found, create a new user
                 if not user:
                     log.info(f"Creating new user for Microsoft OAuth: {email}")
+                    # Set flag for new user
+                    is_new_user = True
+                    
                     # Generate a username from email
                     username = email.split("@")[0]
                     
@@ -435,9 +447,9 @@ async def auth_via_microsoft(request: Request):
             # Create JWT access token for the user
             access_token = create_access_token(data={"sub": user.email})
             
-            # Redirect to frontend with token
+            # Redirect to frontend with token and new user flag
             frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
-            redirect_url = f"{frontend_url}/oauth/callback?token={access_token}"
+            redirect_url = f"{frontend_url}/oauth/callback?token={access_token}&is_new_user={str(is_new_user).lower()}"
             
             log.info(f"Redirecting to frontend: {redirect_url}")
             return RedirectResponse(url=redirect_url)
@@ -599,6 +611,7 @@ def mask_string(s, show_start=4, show_end=4):
 async def get_oauth_user(provider: str, request: Request):
     """
     Get user information from OAuth provider and create/update user in database
+    Returns a tuple: (user, is_new_user)
     """
     if provider not in oauth._clients:
         log.error(f"Unsupported OAuth provider: {provider}")
@@ -685,6 +698,25 @@ async def get_oauth_user(provider: str, request: Request):
                 # Get the raw data from the request to help diagnose
                 log.error(f"Request query string: {request.url.query}")
                 raise
+        elif provider == "google":
+            try:
+                # For Google, we'll use the standard library approach without passing extra params
+                # The redirect URI is already stored in the session from the initial auth request
+                log.info("Using standard OAuth token exchange for Google")
+                
+                # Log the request URL and parameters for debugging
+                log.info(f"Google callback URL: {request.url}")
+                log.info(f"Google callback query params: {dict(request.query_params)}")
+                
+                # Use the library's token exchange mechanism without explicit redirect URI
+                # It will use the same one that was used for the initial authorization request
+                token = await client.authorize_access_token(request)
+                log.info("Successfully obtained Google access token")
+            except Exception as e:
+                log.error(f"Google token exchange error: {str(e)}")
+                log.error(f"Google callback URL: {request.url}")
+                log.error(f"Google callback query params: {dict(request.query_params)}")
+                raise
         else:
             token = await client.authorize_access_token(request)
             
@@ -736,12 +768,16 @@ async def get_oauth_user(provider: str, request: Request):
         
         # Check if user exists in database
         db = SessionLocal()
+        is_new_user = False  # Flag to track if this is a new user
+        
         try:
             user = get_user_by_oauth(db, provider=provider, oauth_id=oauth_id)
             
             # If user doesn't exist, create a new one
             if not user:
                 log.info(f"Creating new user for {provider} OAuth: {email}")
+                is_new_user = True  # Set flag for new user
+                
                 # Generate a username from email if not available
                 username = email.split("@")[0]
                 
@@ -775,7 +811,7 @@ async def get_oauth_user(provider: str, request: Request):
         finally:
             db.close()
         
-        return user
+        return user, is_new_user
         
     except Exception as e:
         log.error(f"OAuth error for {provider}: {str(e)}")

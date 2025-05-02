@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from sqlalchemy.exc import SQLAlchemyError
+from typing import List, Optional, Dict, Any
 import logging
-import openai
 
-from app.db import SessionLocal
+from app.db import get_db
 from app.auth.jwt import get_current_active_user
-from app.models import User, LearningPath, UserLearningPath
+from app.models import User, LearningPath, UserLearningPath, CourseSection
 from app.learning_paths.schemas import (
     LearningPathCreate,
     LearningPathResponse,
@@ -17,7 +17,10 @@ from app.learning_paths.schemas import (
     GenerateLearningPathRequest,
     LearningPathBasicInfo,
     GenerateDetailsFromOutlineRequest,
-    GenerateCourseTitleRequest
+    GenerateCourseTitleRequest,
+    CourseSectionCreate,
+    CourseSectionUpdate,
+    CourseSectionResponse
 )
 from app.learning_paths.crud import (
     get_learning_path,
@@ -29,35 +32,16 @@ from app.learning_paths.crud import (
     get_user_learning_path,
     assign_learning_path_to_user,
     update_user_learning_path_progress,
-    get_user_learning_path_by_ids
+    get_user_learning_path_by_ids,
+    clone_learning_path_for_user
 )
 from app.services.ai_generator import generate_learning_path_with_ai
 from app.services.learning_outline_service import LearningPathOutlineService
 from app.services.ai_generator import LearningPathPlannerAgent
 from app.services.learning_detail_service import LearningPathDetailService
-from app.learning_paths.schemas import GenerateDetailsFromOutlineRequest
-from app.services.learning_outline_service import LearningPathOutlineService
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import List
-import logging
-from app.services.learning_detail_service import LearningPathDetailService
-from pydantic import BaseModel
-from typing import List, Dict, Any
-from pydantic import BaseModel
-from typing import List
-from app.learning_paths.schemas import GenerateCourseTitleRequest
 from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/learning-paths", response_model=List[LearningPathResponse])
 def read_learning_paths(
@@ -395,12 +379,45 @@ def delete_my_learning_path(
             detail="An error occurred while deleting the learning path."
         )
 
-# --- Helper function needed in app/learning_paths/crud.py ---
-# You might need to add this function if it doesn't exist
-
-def get_user_learning_path_by_ids(db: Session, user_id: int, learning_path_id: int) -> Optional[UserLearningPath]:
-    """Retrieve a specific UserLearningPath assignment."""
-    return db.query(UserLearningPath).filter(
-        UserLearningPath.user_id == user_id,
-        UserLearningPath.learning_path_id == learning_path_id
-    ).first()
+@router.post("/learning-paths/{path_id}/add-to-my-paths", response_model=UserLearningPathResponse)
+def add_learning_path_to_user_collection(
+    path_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Add a learning path to the user's collection by creating a personal copy.
+    
+    This endpoint:
+    1. Creates a clone of the learning path with all its courses and sections
+    2. Associates the cloned path with the user
+    3. Returns the new user-learning path association
+    
+    This allows users to have their own copy of learning paths they discover through recommendations.
+    """
+    try:
+        # Clone the learning path for the user
+        user_path = clone_learning_path_for_user(db, current_user.id, path_id)
+        
+        # Return the user learning path association
+        return UserLearningPathResponse(
+            id=user_path.id,
+            user_id=user_path.user_id,
+            learning_path_id=user_path.learning_path_id,
+            progress=user_path.progress,
+            start_date=user_path.start_date,
+            completed_at=user_path.completed_at,
+            created_at=user_path.created_at,
+            updated_at=user_path.updated_at,
+            learning_path=LearningPathResponse.model_validate(user_path.learning_path)
+        )
+    except HTTPException as e:
+        # Re-raise HTTP exceptions
+        raise e
+    except Exception as e:
+        # Log any other errors
+        logging.error(f"Error adding learning path to user collection: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to add learning path to your collection: {str(e)}"
+        )

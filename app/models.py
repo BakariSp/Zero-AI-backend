@@ -328,4 +328,45 @@ class PromotionCodeUsage(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     
     def __repr__(self):
-        return f"<PromotionCodeUsage(code='{self.code}', tier='{self.tier}', used={self.times_used}/{self.total_limit})>"
+        return f"<PromotionCodeUsage(code={self.code}, tier={self.tier}, used={self.times_used}/{self.total_limit})>"
+
+class UserTermsAcceptance(Base):
+    """
+    Model to track user acceptance of terms and conditions.
+    Logs each time a user accepts terms with version info and IP address for traceability.
+    """
+    __tablename__ = "user_terms_acceptance"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    terms_version = Column(String(10), nullable=False)  # e.g., "v1.0"
+    signed_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    ip_address = Column(String(45), nullable=True)  # IPv6 addresses can be up to 45 chars
+    
+    # Relationship to User
+    user = relationship("User", backref="terms_acceptances")
+    
+    def __repr__(self):
+        return f"<UserTermsAcceptance(user_id={self.user_id}, terms_version={self.terms_version}, signed_at={self.signed_at})>"
+
+class InterestLearningPathRecommendation(Base):
+    """
+    Model to store recommendations mapping interests to learning paths with scores and priorities.
+    Used for recommending learning paths to users based on their interests.
+    """
+    __tablename__ = "interest_learning_path_recommendation"
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    interest_id = Column(String(50), nullable=False, index=True)  # e.g., 'tech_basics'
+    learning_path_id = Column(Integer, ForeignKey("learning_paths.id", ondelete="CASCADE"), nullable=False, index=True)
+    score = Column(Float, nullable=True)  # Recommendation strength (0-1)
+    priority = Column(Integer, nullable=True)  # For ordering display (lower = higher)
+    tags = Column(JSON, nullable=True)  # Metadata like ['beginner', 'fun']
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Relationship to Learning Path
+    learning_path = relationship("LearningPath")
+    
+    def __repr__(self):
+        return f"<InterestLearningPathRecommendation(interest_id='{self.interest_id}', learning_path_id={self.learning_path_id}, score={self.score})>"

@@ -5,8 +5,8 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime, timedelta
 
-from app.models import User, PromotionCodeUsage
-from app.users.schemas import UserCreate
+from app.models import User, PromotionCodeUsage, UserTermsAcceptance
+from app.users.schemas import UserCreate, UserUpdate, UserInterests
 from app.utils.security import pwd_context
 from app.user_daily_usage.crud import get_or_create_daily_usage
 
@@ -366,3 +366,84 @@ def get_subscription_limits(subscription_type: str) -> Dict[str, int]:
             result[key] = value
     
     return result 
+
+# Functions for user terms acceptance
+def create_terms_acceptance(db: Session, user_id: int, terms_version: str, ip_address: str = None):
+    """
+    Create a new record of terms acceptance for a user
+    """
+    # First verify the user exists
+    user = get_user(db, user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with ID {user_id} not found"
+        )
+    
+    # Create new terms acceptance record
+    db_terms = UserTermsAcceptance(
+        user_id=user_id,
+        terms_version=terms_version,
+        ip_address=ip_address
+    )
+    
+    db.add(db_terms)
+    db.commit()
+    db.refresh(db_terms)
+    return db_terms
+
+def get_user_terms_acceptances(db: Session, user_id: int, skip: int = 0, limit: int = 100):
+    """
+    Get all terms acceptances for a specific user
+    """
+    return db.query(UserTermsAcceptance).filter(
+        UserTermsAcceptance.user_id == user_id
+    ).order_by(
+        UserTermsAcceptance.signed_at.desc()
+    ).offset(skip).limit(limit).all()
+
+def get_latest_terms_acceptance(db: Session, user_id: int, terms_version: str = None):
+    """
+    Get the latest terms acceptance for a user, optionally filtering by version
+    """
+    query = db.query(UserTermsAcceptance).filter(UserTermsAcceptance.user_id == user_id)
+    
+    if terms_version:
+        query = query.filter(UserTermsAcceptance.terms_version == terms_version)
+    
+    return query.order_by(UserTermsAcceptance.signed_at.desc()).first()
+
+def has_accepted_terms(db: Session, user_id: int, terms_version: str):
+    """
+    Check if a user has accepted a specific version of the terms
+    """
+    acceptance = get_latest_terms_acceptance(db, user_id, terms_version)
+    return acceptance is not None
+
+def auto_accept_terms_for_oauth_user(db: Session, user_id: int, terms_version: str = "v1.0", ip_address: str = "0.0.0.0") -> bool:
+    """
+    Automatically accept the current terms version for a user created via OAuth.
+    This should be called when a user logs in or registers through an OAuth provider.
+    
+    Args:
+        db: Database session
+        user_id: The ID of the user
+        terms_version: Version of the terms to accept (default: "v1.0")
+        ip_address: IP address of the user (default: "0.0.0.0" for system-generated)
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Check if the user has already accepted this version
+        if has_accepted_terms(db, user_id, terms_version):
+            # Already accepted, nothing to do
+            return True
+        
+        # Create the terms acceptance record
+        create_terms_acceptance(db, user_id, terms_version, ip_address)
+        logging.info(f"Auto-accepted terms version {terms_version} for OAuth user ID {user_id}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to auto-accept terms for user {user_id}: {str(e)}")
+        return False 

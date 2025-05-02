@@ -170,3 +170,29 @@ class EnhancedTaskStatus(BaseModel):
     error_details: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+
+class RecommendationMetadata(BaseModel):
+    """Metadata about a learning path recommendation"""
+    interest_id: str
+    score: Optional[float] = None
+    priority: Optional[int] = None
+    tags: Optional[List[str]] = None
+
+class SimplifiedLearningPathResponse(BaseModel):
+    """Simplified learning path data for recommendations"""
+    id: int
+    title: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    difficulty_level: Optional[str] = None
+    estimated_days: Optional[int] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+class InterestRecommendationResponse(BaseModel):
+    """Response model for interest-based learning path recommendations"""
+    learning_paths: List[SimplifiedLearningPathResponse] = []
+    metadata: Dict[int, RecommendationMetadata] = {}  # Maps learning path IDs to metadata
+    refresh_token: str  # Token for getting refreshed results (different seed)
+    
+    model_config = ConfigDict(from_attributes=True)

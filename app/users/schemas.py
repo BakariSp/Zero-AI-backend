@@ -46,4 +46,25 @@ class UserResponse(UserBase):
         return v
     
     class Config:
+        from_attributes = True
+
+# Terms Acceptance Schemas
+class TermsAcceptanceCreate(BaseModel):
+    terms_version: str
+    ip_address: Optional[str] = None
+
+class TermsAcceptanceResponse(BaseModel):
+    id: int
+    user_id: int
+    terms_version: str
+    signed_at: datetime
+    ip_address: Optional[str] = None
+    
+    @validator('signed_at', pre=True)
+    def format_datetime(cls, v):
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
+    
+    class Config:
         from_attributes = True 

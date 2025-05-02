@@ -124,22 +124,39 @@ app.add_middleware(
     max_age=86400,  # Cache preflight response for 24 hours
 )
 
-# Production security middleware - only add in production environments
-is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
-if is_production:
-    app.add_middleware(SecurityHeadersMiddleware)
-    
-    # Only add HTTPS redirect in production and if not behind a proxy that terminates SSL
-    if not os.getenv("BEHIND_PROXY", "false").lower() == "true":
-        app.add_middleware(HTTPSRedirectMiddleware)
-    
-    # Add trusted host middleware in production
-    app.add_middleware(
-        TrustedHostMiddleware, 
-        allowed_hosts=["learnfromzero.app", "www.learnfromzero.app", os.getenv("ALLOWED_HOST", "*")]
-    )
-    
-    log.info("Production security middleware enabled")
+# Security headers middleware for production
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+# Temporarily remove TrustedHostMiddleware to diagnose the issue
+# is_production = os.getenv("ENVIRONMENT", "development").lower() == "production"
+# if is_production:
+#     app.add_middleware(SecurityHeadersMiddleware)
+#     
+#     # Only add HTTPS redirect in production and if not behind a proxy that terminates SSL
+#     if not os.getenv("BEHIND_PROXY", "false").lower() == "true":
+#         app.add_middleware(HTTPSRedirectMiddleware)
+#     
+#     # Add trusted host middleware in production
+#     app.add_middleware(
+#         TrustedHostMiddleware, 
+#         allowed_hosts=["learnfromzero.app", "www.learnfromzero.app", os.getenv("ALLOWED_HOST", "*")]
+#     )
+#     
+#     log.info("Production security middleware enabled")
+# else:
+#     # Allow localhost and 127.0.0.1 in development
+#     app.add_middleware(
+#         TrustedHostMiddleware, 
+#         allowed_hosts=["localhost", "127.0.0.1", os.getenv("ALLOWED_HOST", "*")]
+#     )
+#     log.info("Development environment: TrustedHostMiddleware configured for localhost")
 
 # Add middleware for user authentication - should come AFTER OPTIONS middleware
 @app.middleware("http")
@@ -217,16 +234,6 @@ def read_root():
 @app.get("/users/me", response_model=UserResponse)
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
-
-# Security headers middleware for production
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        return response
 
 # When running in production, use:
 # uvicorn main:app --host 0.0.0.0 --port $PORT
