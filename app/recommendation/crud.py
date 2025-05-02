@@ -137,31 +137,76 @@ def get_random_learning_paths(
     Returns:
     - List of dictionaries with learning path data and dummy recommendation metadata
     """
-    # Get a query for learning paths
-    query = db.query(LearningPath)
+    # Query learning paths that are in the recommendation table
+    # Instead of querying all learning paths, we only query those that are in the recommendations
+    query = db.query(
+        InterestLearningPathRecommendation, 
+        LearningPath
+    ).join(
+        LearningPath, 
+        InterestLearningPathRecommendation.learning_path_id == LearningPath.id
+    )
     
     # Exclude specific learning path IDs if provided
     if exclude_ids:
         query = query.filter(~LearningPath.id.in_(exclude_ids))
     
-    # Get all learning paths
-    learning_paths = query.all()
+    # Get all recommended learning paths
+    recommendation_data = query.all()
     
-    # Shuffle the paths to get a random selection
-    random.shuffle(learning_paths)
+    if not recommendation_data:
+        # If no recommended paths (unlikely), fall back to original behavior
+        query = db.query(LearningPath)
+        if exclude_ids:
+            query = query.filter(~LearningPath.id.in_(exclude_ids))
+        learning_paths = query.all()
+        
+        # Shuffle the paths to get a random selection
+        random.shuffle(learning_paths)
+        
+        # Create results in the same format as get_interest_learning_paths
+        results = []
+        for path in learning_paths[:limit]:
+            results.append({
+                "learning_path": path,
+                "recommendation": {
+                    "interest_id": "random",
+                    "score": 0.5,  # Neutral score
+                    "priority": 10,  # Low priority
+                    "tags": ["random"]
+                }
+            })
+        
+        return results
     
-    # Create results in the same format as get_interest_learning_paths
-    results = []
-    for path in learning_paths[:limit]:
-        # Create a dummy recommendation object with generic data
-        results.append({
-            "learning_path": path,
+    # Convert query results to list of dictionaries with recommendation data
+    recommendations = [
+        {
             "recommendation": {
-                "interest_id": "random",
+                "interest_id": "random",  # Mark as random selection but from recommendation pool
                 "score": 0.5,  # Neutral score
                 "priority": 10,  # Low priority
-                "tags": ["random"]
-            }
-        })
+                "tags": rec.tags if rec.tags else ["recommended_random"]
+            },
+            "learning_path": path
+        }
+        for rec, path in recommendation_data
+    ]
+    
+    # Shuffle recommendations to get a random selection
+    random.shuffle(recommendations)
+    
+    # Get unique learning paths up to the limit
+    seen_path_ids = set()
+    results = []
+    
+    for item in recommendations:
+        if len(results) >= limit:
+            break
+            
+        path = item["learning_path"]
+        if path.id not in seen_path_ids:
+            results.append(item)
+            seen_path_ids.add(path.id)
     
     return results
