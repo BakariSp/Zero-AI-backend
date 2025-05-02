@@ -9,8 +9,11 @@ def get_sections(db: Session, skip: int = 0, limit: int = 100) -> List[CourseSec
     return db.query(CourseSection).filter(CourseSection.is_template == True).offset(skip).limit(limit).all()
 
 # 获取单个系统模板章节
-def get_section(db: Session, section_id: int) -> Optional[CourseSection]:
-    return db.query(CourseSection).filter(CourseSection.id == section_id, CourseSection.is_template == True).first()
+def get_section(db: Session, section_id: int, template_only: bool = False) -> Optional[CourseSection]:
+    query = db.query(CourseSection).filter(CourseSection.id == section_id)
+    if template_only:
+        query = query.filter(CourseSection.is_template == True)
+    return query.first()
 
 # 获取用户自定义章节列表
 def get_user_sections(db: Session, user_id: int, skip: int = 0, limit: int = 100) -> List[UserSection]:
