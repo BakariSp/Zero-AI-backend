@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Dict
 import logging
 from sqlalchemy.sql import text
+import asyncio
 
 from app.db import SessionLocal
 from app.auth.jwt import get_current_active_user
@@ -35,6 +36,7 @@ from app.services.ai_generator import (
     get_card_generator_agent
 )
 from app.setup import increment_user_resource_usage, get_user_remaining_resources
+from app.utils.url_validator import is_valid_url, get_valid_resources  # Import the validators
 
 router = APIRouter()
 
@@ -316,6 +318,7 @@ async def generate_ai_card(
         except RuntimeError as e:
              raise HTTPException(status_code=503, detail=f"AI Service Unavailable: {e}")
 
+        # Generate the card - will include URL validation and better resources
         card_data: CardCreate = await card_generator.generate_card(
              keyword=request.keyword,
              context=request.context,
@@ -324,6 +327,9 @@ async def generate_ai_card(
              course_title=request.course_title,
              difficulty=request.difficulty or "intermediate" # Use request difficulty or default
         )
+
+        # Log the result for validation and diagnostics
+        logging.info(f"Generated card for keyword '{request.keyword}' with validated resources: {card_data.resources}")
 
         # Create the card in the database, passing section_id for linking
         # The crud function handles checking for duplicates and linking
@@ -340,4 +346,51 @@ async def generate_ai_card(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate card: {str(e)}"
-        ) 
+        )
+
+@router.post("/debug/validate-resources", response_model=Dict)
+async def debug_validate_resources(
+    keyword: str,
+    context: Optional[str] = None,
+    resources: Optional[List[Dict[str, str]]] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Debug endpoint to validate resources and get enhanced ones.
+    Admin only.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions"
+        )
+        
+    results = {
+        "keyword": keyword,
+        "original_resources": resources or [],
+        "valid_original_resources": [],
+        "invalid_urls": [],
+        "enhanced_resources": []
+    }
+    
+    # Check validity of original resources
+    if resources:
+        for resource in resources:
+            url = resource.get("url")
+            if url and is_valid_url(url):
+                results["valid_original_resources"].append(resource)
+            else:
+                results["invalid_urls"].append(url)
+    
+    # Get enhanced resources
+    enhanced_resources = await asyncio.to_thread(
+        get_valid_resources,
+        keyword=keyword,
+        context=context,
+        existing_resources=resources
+    )
+    
+    results["enhanced_resources"] = enhanced_resources
+    
+    return results 

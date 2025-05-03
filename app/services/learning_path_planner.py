@@ -17,6 +17,7 @@ from app.learning_paths.crud import create_learning_path, assign_learning_path_t
 from app.cards.crud import create_card
 from app.courses.crud import create_course, add_section_to_course
 from app.sections.crud import create_section, add_card_to_section
+from app.utils.url_validator import get_valid_resources  # Import the URL validator
 from openai import AsyncOpenAI
 import os
 
@@ -193,7 +194,8 @@ class LearningPathPlannerService:
                 # Store context needed after gather
                 section_contexts.append({
                     "section_id": section_id,
-                    "section_title": section_title # Keep title for logging/debugging
+                    "section_title": section_title, # Keep title for logging/debugging
+                    "course_title": course_title     # Store course title for resource validation
                 })
 
         # 2. Execute all section tasks in parallel
@@ -208,6 +210,7 @@ class LearningPathPlannerService:
         for i, batch_result in enumerate(batch_results):
             section_id = section_contexts[i]["section_id"]
             section_title = section_contexts[i]["section_title"]
+            course_title = section_contexts[i]["course_title"]
 
             if isinstance(batch_result, Exception):
                 logging.error(f"Card generation task failed for section {section_id} ('{section_title}'): {batch_result}")
@@ -234,7 +237,31 @@ class LearningPathPlannerService:
                       continue
 
                  try:
-                     # Create the card
+                     # NEW: Validate and enhance resources using Google Search API
+                     if hasattr(card_data, 'resources'):
+                         # Check if we need to convert to dict for processing
+                         card_dict = card_data.dict() if hasattr(card_data, 'dict') else card_data
+                         
+                         # Create search context from card and section data
+                         context = f"{section_title} - {course_title}"
+                         
+                         # Validate and enhance resources
+                         validated_resources = await asyncio.to_thread(
+                             get_valid_resources,
+                             keyword=card_data.keyword,
+                             context=context,
+                             existing_resources=card_dict.get('resources', [])
+                         )
+                         
+                         # Update card resources with validated ones
+                         if hasattr(card_data, 'resources'):
+                             card_data.resources = validated_resources
+                         else:
+                             # If card_data is a dict
+                             card_dict['resources'] = validated_resources
+                             card_data = card_dict
+                     
+                     # Create the card with validated resources
                      card_db = create_card(db, card_data) # Assuming create_card handles CardCreate schema
 
                      # Associate card with section
@@ -249,16 +276,15 @@ class LearningPathPlannerService:
                          "section_id": section_id
                      })
 
+                     # Update progress if callback provided
                      total_cards_processed += 1
-                     # Report progress if callback provided
                      if progress_callback:
-                         # This simple callback assumes progress per card processed.
-                         progress_callback(total_cards_processed) # Adapt as needed
-
-                 except Exception as db_err:
-                      logging.error(f"Error saving card (Keyword: {getattr(card_data, 'keyword', 'N/A')}) for section {section_id}: {db_err}", exc_info=True)
-                      # Decide how to handle DB errors (e.g., skip card, fail section?)
-
+                          progress_callback(total_cards_processed)
+                 except Exception as e:
+                     logging.error(f"Error creating card for section {section_id}: {e}", exc_info=True)
+                     continue # Skip this card on error but continue with others
+        
+        logging.info(f"Successfully created {total_cards_processed} cards across {len(section_tasks)} sections")
         return result_cards
 
     async def generate_cards_for_structured_path(
@@ -268,103 +294,132 @@ class LearningPathPlannerService:
         cards_per_section: int,
         progress_callback: Optional[callable] = None
     ):
-        """
-        Generates a fixed number of cards for each section based on the section title.
-        Uses the new CardGeneratorAgent method.
-        """
-        all_sections_data = []
-        for course in learning_path_structure.get("courses", []):
-            course_title = course.get("title")
-            for section in course.get("sections", []):
-                all_sections_data.append({
-                    "section_id": section.get("section_id"),
-                    "section_title": section.get("title"),
-                    "course_title": course_title,
-                    # Add difficulty if available in structure, else default
-                    "difficulty": learning_path_structure.get("learning_path", {}).get("difficulty_level", "intermediate")
-                })
+        """Generate cards for a learning path with predefined course/section structure"""
+        # Get path data for context
+        path_id = learning_path_structure.get("id")
+        path_title = learning_path_structure.get("title")
+        path_difficulty = learning_path_structure.get("difficulty_level", "intermediate")
 
-        # Use a semaphore to limit concurrent AI calls if needed
-        # semaphore = asyncio.Semaphore(5) # Limit to 5 concurrent AI calls
+        # Get total sections for progress tracking
+        total_sections = sum(len(course.get("sections", [])) 
+                           for course in learning_path_structure.get("courses", []))
+        sections_processed = 0
+        cards_processed = 0
 
+        # Store results
+        all_created_cards = []
+
+        # Configure concurrency (adjust as needed)
+        # semaphore = asyncio.Semaphore(5) # Limit concurrent section processing
+
+        # Process each section
         async def process_section(section_data):
             # async with semaphore: # Uncomment if using semaphore
-                section_id = section_data["section_id"]
-                section_title = section_data["section_title"]
-                course_title = section_data["course_title"]
-                difficulty = section_data["difficulty"]
-                generated_cards_count = 0
-                error_msg = None
+            nonlocal sections_processed, cards_processed
+            
+            try:
+                section_id = section_data.get("id")
+                section_title = section_data.get("title")
+                course_title = section_data.get("course_title", "")  # Get course title if available
+                
+                logging.info(f"Generating cards for section {section_id}: {section_title}")
+                
+                # Generate cards for this section
+                cards = await self.card_manager.card_generator.generate_multiple_cards_from_topic(
+                    topic=section_title,
+                    num_cards=cards_per_section,
+                    course_title=course_title,
+                    difficulty=path_difficulty
+                )
+                
+                created_cards = []
+                
+                for card in cards:
+                    try:
+                        # NEW: Validate and enhance resources using Google Search API
+                        if hasattr(card, 'resources'):
+                            # Check if we need to convert to dict for processing
+                            card_dict = card.dict() if hasattr(card, 'dict') else card
+                            
+                            # Create search context from card and section data
+                            context = f"{section_title} - {course_title}"
+                            
+                            # Validate and enhance resources
+                            validated_resources = await asyncio.to_thread(
+                                get_valid_resources,
+                                keyword=card.keyword,
+                                context=context,
+                                existing_resources=card_dict.get('resources', [])
+                            )
+                            
+                            # Update card resources with validated ones
+                            if hasattr(card, 'resources'):
+                                card.resources = validated_resources
+                            else:
+                                # If card is a dict
+                                card_dict['resources'] = validated_resources
+                                card = card_dict
+                        
+                        # Create card in DB
+                        card_db = create_card(db, card)
+                        
+                        # Associate with section
+                        add_card_to_section(db, section_id, card_db.id)
+                        
+                        created_cards.append({
+                            "id": card_db.id,
+                            "keyword": card.keyword
+                        })
+                        
+                        cards_processed += 1
+                        if progress_callback:
+                            progress_callback(cards_processed)
+                            
+                    except Exception as e:
+                        logging.error(f"Error saving card for section {section_id}: {e}")
+                
+                # Update progress
+                sections_processed += 1
+                
+                return {
+                    "section_id": section_id,
+                    "cards": created_cards
+                }
+                
+            except Exception as e:
+                logging.error(f"Error processing section {section_data.get('id')}: {e}")
+                return {
+                    "section_id": section_data.get("id"),
+                    "error": str(e),
+                    "cards": []
+                }
 
-                if not section_title:
-                    logging.warning(f"Skipping section ID {section_id} due to missing title.")
-                    if progress_callback:
-                        progress_callback(section_id, "failed", 0, "Missing section title")
-                    return
-
-                if progress_callback:
-                    progress_callback(section_id, "generating", 0)
-
-                try:
-                    # Call the new agent method
-                    card_data_list: List[CardCreate] = await self.card_manager.card_generator.generate_multiple_cards_from_topic(
-                        topic=section_title,
-                        num_cards=cards_per_section,
-                        course_title=course_title,
-                        difficulty=difficulty
-                    )
-
-                    if not card_data_list or len(card_data_list) == 0:
-                         logging.warning(f"AI did not return any valid cards for section: {section_title} (ID: {section_id})")
-                         # Report failure for this section
-                         if progress_callback:
-                             progress_callback(section_id, "failed", 0, "AI returned no valid cards")
-                         return # Stop processing this section
-
-                    # Process and save cards for this section
-                    card_order = 0
-                    for card_index, card_data in enumerate(card_data_list):
-                        try:
-                            # Ensure keyword is present (should be from the new generator)
-                            if not hasattr(card_data, 'keyword') or not card_data.keyword:
-                                card_data.keyword = f"{section_title} - Card {card_index + 1}" # Fallback keyword
-                                logging.warning(f"Generated card for section {section_id} missing keyword, using fallback: {card_data.keyword}")
-
-                            # Create card (create_card handles duplicates by keyword)
-                            card_db = create_card(db, card_data)
-
-                            # Add card to section with order
-                            add_card_to_section(db, section_id, card_db.id, card_order + 1)
-                            card_order += 1
-                            generated_cards_count += 1
-
-                        except Exception as card_err:
-                            logging.error(f"Error processing/saving card {card_index} for section {section_id}: {card_err}", exc_info=True)
-                            # Decide if one card failure fails the section
-
-                    # Check if expected number of cards were generated/saved
-                    if generated_cards_count < cards_per_section:
-                         logging.warning(f"Section {section_id} completed with {generated_cards_count}/{cards_per_section} cards.")
-                         error_msg = f"Generated {generated_cards_count}/{cards_per_section} cards"
-                         # Decide if this counts as 'failed' or 'completed_with_errors' for the section
-                         if progress_callback:
-                             progress_callback(section_id, "failed", generated_cards_count, error_msg) # Or a different status
-
-                    else:
-                         if progress_callback:
-                             progress_callback(section_id, "completed", generated_cards_count)
-
-                except Exception as e:
-                    logging.error(f"Card generation failed for section {section_id} ('{section_title}'): {e}", exc_info=True)
-                    error_msg = str(e)
-                    if progress_callback:
-                        progress_callback(section_id, "failed", generated_cards_count, error_msg)
-
-        # Run processing for all sections concurrently
-        tasks = [process_section(data) for data in all_sections_data]
-        await asyncio.gather(*tasks, return_exceptions=True) # Handle potential errors during gather
-
-        logging.info(f"Finished card generation attempt for structured path {learning_path_structure.get('learning_path', {}).get('id')}")
+        # Prepare section tasks
+        section_tasks = []
+        for course in learning_path_structure.get("courses", []):
+            course_title = course.get("title", "")
+            for section in course.get("sections", []):
+                # Add course title to section data for context in resource generation
+                section["course_title"] = course_title
+                section_tasks.append(process_section(section))
+                
+        # Run all section tasks concurrently
+        section_results = await asyncio.gather(*section_tasks, return_exceptions=True)
+        
+        # Process results
+        for result in section_results:
+            if isinstance(result, Exception):
+                logging.error(f"Section processing failed: {result}")
+                continue
+            
+            if isinstance(result, dict) and "cards" in result:
+                all_created_cards.extend(result["cards"])
+                
+        return {
+            "cards_created": len(all_created_cards),
+            "sections_processed": sections_processed,
+            "cards": all_created_cards
+        }
 
     # Make sure generate_cards_for_learning_path still exists for the old endpoints
     # It might need adjustments based on the CardGeneratorAgent changes if you modified generate_card directly

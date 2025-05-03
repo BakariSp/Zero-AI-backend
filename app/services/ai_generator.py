@@ -13,6 +13,7 @@ from app.cards.schemas import CardCreate
 from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List
+from app.utils.url_validator import get_valid_resources  # Import the URL validator
 
 # Load environment variables
 load_dotenv()
@@ -383,86 +384,111 @@ class CardGeneratorAgent(BaseAgent):
         course_title: Optional[str] = None,
         difficulty: str = "intermediate" # Add difficulty
     ) -> CardCreate:
-        """Generate a detailed card for a keyword with context"""
+        """Generate a single card based on keyword and context."""
         try:
-            # --- Cache versioning ---
+            # Base cache key (can be refined if needed)
             cache_params = {
                 "keyword": keyword,
-                "context": context,
                 "section_title": section_title,
                 "course_title": course_title,
                 "difficulty": difficulty,
-                "version": "1.2" # Incremented version due to prompt change
+                "version": "1.2"  # Increment when prompt or validation changes
             }
-            cache_key = generate_cache_key("single_card", cache_params)
-            # --- End Cache versioning ---
-
-            context_parts = []
-            if course_title:
-                context_parts.append(f"Course: {course_title}")
-            if section_title:
-                context_parts.append(f"Section: {section_title}")
             if context:
-                context_parts.append(f"General Context: {context}")
-            # Keep difficulty as it's a variable parameter
-            context_parts.append(f"Target Difficulty: {difficulty}")
-
-            context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
-
-            # --- Detailed Prompt for General Model ---
-            prompt = f"""
-            You are an expert educational content creator specializing in flashcards.
-            Based on the provided keyword and context, generate a single educational flashcard.
-
-            Context:
-            {context_str}
-            Keyword: "{keyword}"
-            Target Difficulty: {difficulty}
-
-            Format the response as a single JSON object with the following exact structure and fields:
-            {{
-                "keyword": "{keyword}",
-                "question": "A clear question related to the keyword.",
-                "answer": "A concise and accurate answer to the question.",
-                "explanation": "A brief explanation providing more context or detail about the answer.",
-                "difficulty": "{difficulty}", // Should match the target difficulty
-                "resources": [{{ "url": "valid_url", "title": "Resource Title" }}] // REQUIRED list of relevant resource URLs and titles (can be empty list [] if none found)
-            }}
-
-            Ensure the output is ONLY the JSON object, starting with {{ and ending with }}. Do not include any introductory text, markdown formatting, or explanations outside the JSON structure.
-            """
-            # --- End Detailed Prompt ---
-
-            logging.debug(f"Generating single card with detailed prompt:\n{prompt}")
-            response = await asyncio.to_thread( # Use asyncio.to_thread
-                self.client.chat.completions.create, # Use self.client
-                messages=[
-                    # System message is still useful for setting the role
-                    {"role": "system", "content": "You are an expert educational content creator who outputs flashcard data in JSON format."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7, # Adjust temperature as needed
-                max_tokens=1000,
-                model=self.deployment, # Use self.deployment
-                response_format={"type": "json_object"} # Still request JSON
-            )
-
-            content = response.choices[0].message.content.strip()
-            logging.debug(f"Raw single card response:\n{content}")
-            data = self._extract_json_from_response(content)
-
-            # --- Keep Validation ---
-            required_fields = ["keyword", "question", "answer", "explanation", "difficulty"]
-            if not isinstance(data, dict) or not all(field in data for field in required_fields):
-                 logging.error(f"Fine-tuned model response missing required fields or not a dict for keyword '{keyword}'. Data: {data}")
-                 raise ValueError("Fine-tuned model response missing required fields or not a dict.")
-
-            data['difficulty'] = data.get('difficulty', difficulty)
-            card_obj = CardCreate(**data)
-            return card_obj.dict() # Return dict for caching
-
+                cache_params["context"] = context[:100]  # Truncate for cache key
+            
+            cache_key = generate_cache_key("single_card", cache_params)
+            
+            async def create_card():
+                # Build context string
+                context_parts = []
+                if course_title:
+                    context_parts.append(f"Course: {course_title}")
+                if section_title:
+                    context_parts.append(f"Section: {section_title}")
+                if context:
+                    context_parts.append(f"Additional context: {context}")
+                
+                context_str = "\n".join(context_parts) if context_parts else "No additional context provided."
+                
+                # Create the prompt
+                prompt = f"""
+                Create a high-quality educational flashcard about the keyword: "{keyword}".
+                
+                Context information:
+                {context_str}
+                
+                The card should be at {difficulty} level difficulty.
+                
+                Please format your response as a JSON object with the following structure:
+                {{
+                    "keyword": "{keyword}",
+                    "question": "A clear question related to {keyword}",
+                    "answer": "A concise and accurate answer to the question",
+                    "explanation": "A more detailed explanation that provides additional context or examples",
+                    "difficulty": "{difficulty}",
+                    "resources": [
+                        {{ "url": "https://example.com/resource1", "title": "Resource 1 Title" }},
+                        {{ "url": "https://example.com/resource2", "title": "Resource 2 Title" }}
+                    ]
+                }}
+                
+                Ensure the URLs in your resources are real, valid URLs to existing web pages. Prefer academic sources, documentation, or authoritative websites when possible.
+                """
+                
+                logging.debug(f"Generating card for keyword '{keyword}' with prompt:\n{prompt}")
+                
+                # Call Azure OpenAI
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    model=self.deployment,
+                    messages=[
+                        {"role": "system", "content": "You are an expert educational content creator who creates high-quality flashcards with accurate resources."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000,
+                    response_format={"type": "json_object"}
+                )
+                
+                content = response.choices[0].message.content
+                logging.debug(f"Raw card response:\n{content}")
+                
+                # Parse the response
+                card_data = self._extract_json_from_response(content)
+                
+                # Validate URLs and get better resources if needed
+                if "resources" in card_data:
+                    # Validate and enhance resources
+                    validated_resources = await asyncio.to_thread(
+                        get_valid_resources,
+                        keyword=keyword,
+                        context=context or section_title,
+                        existing_resources=card_data["resources"]
+                    )
+                    
+                    # Update the card with validated resources
+                    card_data["resources"] = validated_resources
+                else:
+                    # If no resources provided, get some
+                    card_data["resources"] = await asyncio.to_thread(
+                        get_valid_resources,
+                        keyword=keyword,
+                        context=context or section_title
+                    )
+                
+                # Create a CardCreate object
+                return CardCreate(**card_data)
+            
+            # Get from cache or create
+            card_data, from_cache = await get_or_create_cached_data(cache_key, create_card)
+            if from_cache:
+                logging.info(f"Retrieved card for keyword '{keyword}' from cache")
+            
+            return card_data
+            
         except Exception as e:
-            logging.error(f"Error in card generator agent (single card): {e}", exc_info=True)
+            logging.error(f"Error generating card for keyword '{keyword}': {e}", exc_info=True)
             raise
 
     async def generate_multiple_cards_from_topic(
