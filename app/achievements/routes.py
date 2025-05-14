@@ -19,7 +19,8 @@ from app.achievements.crud import (
     delete_achievement,
     get_user_achievements,
     award_achievement_to_user,
-    check_streak_achievements
+    check_streak_achievements,
+    check_completion_achievements
 )
 from app.daily_logs.crud import get_user_streak
 
@@ -130,11 +131,45 @@ def check_user_achievements(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Check and award any new achievements for the current user"""
+    """
+    Check and award any new achievements for the current user.
+    
+    This endpoint evaluates and awards both streak-based achievements and
+    completion-based achievements (cards completed, courses completed, etc.).
+    It's called automatically when users complete cards/courses/paths, but
+    can also be called manually to check for new achievements.
+    """
     # Check streak achievements
     streak = get_user_streak(db, user_id=current_user.id)
     streak_achievements = check_streak_achievements(db, user_id=current_user.id, streak=streak)
     
-    # Could add more achievement checks here
+    # Check completion achievements
+    completion_achievements = check_completion_achievements(db, user_id=current_user.id)
     
-    return streak_achievements 
+    # Combine all achievements
+    all_achievements = streak_achievements + completion_achievements
+    
+    return all_achievements
+
+# Add a duplicate route to match the URL that the frontend is actually using
+@router.post("/achievements/users/me/check-achievements", response_model=List[UserAchievementResponse])
+def check_user_achievements_alt_path(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    Alternative path for checking and awarding achievements.
+    This is a duplicate of the endpoint above to handle a different URL pattern
+    that the frontend is using.
+    """
+    # Check streak achievements
+    streak = get_user_streak(db, user_id=current_user.id)
+    streak_achievements = check_streak_achievements(db, user_id=current_user.id, streak=streak)
+    
+    # Check completion achievements
+    completion_achievements = check_completion_achievements(db, user_id=current_user.id)
+    
+    # Combine all achievements
+    all_achievements = streak_achievements + completion_achievements
+    
+    return all_achievements 

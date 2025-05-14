@@ -3,6 +3,7 @@ from sqlalchemy import func, select, update, insert, text
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 import logging
+from datetime import datetime
 
 from app.models import Card, User, CourseSection, section_cards, LearningPath, UserLearningPath
 from app.cards.schemas import CardCreate, CardUpdate
@@ -135,17 +136,19 @@ def get_user_saved_cards(db: Session, user_id: int) -> List[Dict[str, Any]]:
         for card in card_assoc:
             # Get the association data
             assoc_data = db.execute(
-                """
+                text("""
                 SELECT is_completed, expanded_example, notes, saved_at,
                        difficulty_rating, depth_preference, recommended_by
                 FROM user_cards 
                 WHERE user_id = :user_id AND card_id = :card_id
-                """,
+                """),
                 {"user_id": user_id, "card_id": card.id}
             ).fetchone()
             
             card_data = {
                 "card": card,
+                "card_id": card.id,
+                "user_id": user_id,
                 "is_completed": assoc_data.is_completed,
                 "expanded_example": assoc_data.expanded_example,
                 "notes": assoc_data.notes,
@@ -185,27 +188,29 @@ def save_card_for_user(
     
     # Check if card is already saved by user
     is_saved = db.execute(
-        """
+        text("""
         SELECT 1 FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     ).fetchone()
     
     if is_saved:
         # Card is already saved, return existing data
         assoc_data = db.execute(
-            """
+            text("""
             SELECT is_completed, expanded_example, notes, saved_at, 
                    difficulty_rating, depth_preference, recommended_by
             FROM user_cards 
             WHERE user_id = :user_id AND card_id = :card_id
-            """,
+            """),
             {"user_id": user_id, "card_id": card_id}
         ).fetchone()
         
         return {
             "card": card,
+            "card_id": card_id,
+            "user_id": user_id,
             "is_completed": assoc_data.is_completed,
             "expanded_example": assoc_data.expanded_example,
             "notes": assoc_data.notes,
@@ -225,8 +230,11 @@ def save_card_for_user(
         )
     
     # Save card for user
+    # Use datetime.now() instead of func.now() for raw SQL parameters
+    current_time = datetime.now()
+    
     db.execute(
-        """
+        text("""
         INSERT INTO user_cards (
             user_id, card_id, is_completed, expanded_example, notes, saved_at,
             difficulty_rating, depth_preference, recommended_by
@@ -235,14 +243,14 @@ def save_card_for_user(
             :user_id, :card_id, :is_completed, :expanded_example, :notes, :saved_at,
             :difficulty_rating, :depth_preference, :recommended_by
         )
-        """,
+        """),
         {
             "user_id": user_id, 
             "card_id": card_id,
             "is_completed": False,
             "expanded_example": expanded_example,
             "notes": None,
-            "saved_at": func.now(),
+            "saved_at": current_time,  # Use Python datetime object instead of func.now()
             "difficulty_rating": difficulty_rating,
             "depth_preference": depth_preference,
             "recommended_by": recommended_by
@@ -262,17 +270,19 @@ def save_card_for_user(
     
     # Get the newly created association
     assoc_data = db.execute(
-        """
+        text("""
         SELECT is_completed, expanded_example, notes, saved_at,
                difficulty_rating, depth_preference, recommended_by
         FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     ).fetchone()
     
     return {
         "card": card,
+        "card_id": card_id,
+        "user_id": user_id,
         "is_completed": assoc_data.is_completed,
         "expanded_example": assoc_data.expanded_example,
         "notes": assoc_data.notes,
@@ -292,62 +302,93 @@ def update_user_card(
     difficulty_rating: Optional[int] = None,
     depth_preference: Optional[str] = None
 ) -> Dict[str, Any]:
+    # First check if card exists at all
+    card = get_card(db, card_id)
+    if not card:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Card not found"
+        )
+    
     # Check if card is saved by user
     is_saved = db.execute(
-        """
+        text("""
         SELECT 1 FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     ).fetchone()
     
     if not is_saved:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Card not saved by user"
-        )
-    
-    # Update the association
-    update_dict = {}
-    if is_completed is not None:
-        update_dict["is_completed"] = is_completed
-    if expanded_example is not None:
-        update_dict["expanded_example"] = expanded_example
-    if notes is not None:
-        update_dict["notes"] = notes
-    if difficulty_rating is not None:
-        update_dict["difficulty_rating"] = difficulty_rating
-    if depth_preference is not None:
-        update_dict["depth_preference"] = depth_preference
-    
-    if update_dict:
-        update_str = ", ".join([f"{k} = :{k}" for k in update_dict.keys()])
-        update_dict.update({"user_id": user_id, "card_id": card_id})
+        # Instead of error, create a new user_card entry
+        try:
+            logging.info(f"Card {card_id} not saved for user {user_id}, creating entry")
+            db.execute(
+                text("""
+                INSERT INTO user_cards (
+                    user_id, card_id, is_completed, saved_at
+                )
+                VALUES (
+                    :user_id, :card_id, :is_completed, NOW()
+                )
+                """),
+                {
+                    "user_id": user_id, 
+                    "card_id": card_id,
+                    "is_completed": is_completed if is_completed is not None else False
+                }
+            )
+            db.commit()
+            logging.info(f"Created user_card entry for user {user_id}, card {card_id}")
+        except Exception as e:
+            logging.error(f"Error creating user_card entry: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create user card entry: {str(e)}"
+            )
+    else:    
+        # Update the association
+        update_dict = {}
+        if is_completed is not None:
+            update_dict["is_completed"] = is_completed
+        if expanded_example is not None:
+            update_dict["expanded_example"] = expanded_example
+        if notes is not None:
+            update_dict["notes"] = notes
+        if difficulty_rating is not None:
+            update_dict["difficulty_rating"] = difficulty_rating
+        if depth_preference is not None:
+            update_dict["depth_preference"] = depth_preference
         
-        db.execute(
-            f"""
-            UPDATE user_cards 
-            SET {update_str}
-            WHERE user_id = :user_id AND card_id = :card_id
-            """,
-            update_dict
-        )
-        db.commit()
+        if update_dict:
+            update_str = ", ".join([f"{k} = :{k}" for k in update_dict.keys()])
+            update_dict.update({"user_id": user_id, "card_id": card_id})
+            
+            db.execute(
+                text(f"""
+                UPDATE user_cards 
+                SET {update_str}
+                WHERE user_id = :user_id AND card_id = :card_id
+                """),
+                update_dict
+            )
+            db.commit()
     
     # Get the updated association
-    card = get_card(db, card_id)
     assoc_data = db.execute(
-        """
+        text("""
         SELECT is_completed, expanded_example, notes, saved_at,
                difficulty_rating, depth_preference, recommended_by
         FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     ).fetchone()
     
     return {
         "card": card,
+        "card_id": card_id,
+        "user_id": user_id,
         "is_completed": assoc_data.is_completed,
         "expanded_example": assoc_data.expanded_example,
         "notes": assoc_data.notes,
@@ -360,10 +401,10 @@ def update_user_card(
 def remove_card_from_user(db: Session, user_id: int, card_id: int) -> bool:
     # Check if card is saved by user
     is_saved = db.execute(
-        """
+        text("""
         SELECT 1 FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     ).fetchone()
     
@@ -375,10 +416,10 @@ def remove_card_from_user(db: Session, user_id: int, card_id: int) -> bool:
     
     # Remove the association
     db.execute(
-        """
+        text("""
         DELETE FROM user_cards 
         WHERE user_id = :user_id AND card_id = :card_id
-        """,
+        """),
         {"user_id": user_id, "card_id": card_id}
     )
     db.commit()
@@ -496,4 +537,64 @@ def link_card_to_section(db: Session, card_id: int, section_id: int):
         db.commit()
         logging.info(f"Linked card {card_id} to section {section_id} with order_index {next_order}.")
     else:
-        logging.info(f"Card {card_id} already linked to section {section_id}.") 
+        logging.info(f"Card {card_id} already linked to section {section_id}.")
+
+def get_user_card_by_id(db: Session, user_id: int, card_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Retrieve a specific card saved by a user along with user-specific card data.
+    
+    Args:
+        db: Database session
+        user_id: ID of the user
+        card_id: ID of the card to retrieve
+        
+    Returns:
+        Dictionary containing the card and user-specific data, or None if not found
+    """
+    # First check if the user has saved this card
+    user_card_exists = db.execute(
+        text("""
+        SELECT 1 FROM user_cards 
+        WHERE user_id = :user_id AND card_id = :card_id
+        """),
+        {"user_id": user_id, "card_id": card_id}
+    ).fetchone()
+    
+    if not user_card_exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Card with ID {card_id} not found for this user"
+        )
+    
+    # Get the card data
+    card = db.query(Card).filter(Card.id == card_id).first()
+    if not card:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Card with ID {card_id} not found in database"
+        )
+    
+    # Get the user-specific data from user_cards table
+    user_card_data = db.execute(
+        text("""
+        SELECT is_completed, expanded_example, notes, saved_at,
+               difficulty_rating, depth_preference, recommended_by
+        FROM user_cards 
+        WHERE user_id = :user_id AND card_id = :card_id
+        """),
+        {"user_id": user_id, "card_id": card_id}
+    ).fetchone()
+    
+    # Combine card and user-specific data
+    return {
+        "card": card,
+        "card_id": card_id,
+        "user_id": user_id,
+        "is_completed": user_card_data.is_completed,
+        "expanded_example": user_card_data.expanded_example,
+        "notes": user_card_data.notes,
+        "saved_at": user_card_data.saved_at,
+        "difficulty_rating": user_card_data.difficulty_rating,
+        "depth_preference": user_card_data.depth_preference,
+        "recommended_by": user_card_data.recommended_by
+    } 

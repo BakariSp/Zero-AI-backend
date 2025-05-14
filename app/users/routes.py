@@ -45,8 +45,19 @@ def get_db():
         db.close()
 
 # User profile routes
+@router.options("/users/me")
+async def options_users_me():
+    # This is a dedicated OPTIONS handler that will immediately return a 200 OK
+    # with no response model validation
+    return Response(status_code=200)
+
 @router.get("/users/me", response_model=schemas.UserResponse)
-def read_users_me(current_user: User = Depends(get_current_active_user)):
+def read_users_me(request: Request, current_user: User = Depends(get_current_active_user)):
+    # Log request details to help diagnose the issue
+    logging.info(f"Request method for /users/me: {request.method}")
+    logging.info(f"Authorization header present: {request.headers.get('Authorization') is not None}")
+    
+    # If there's an auth problem, get_current_active_user would already have raised an exception
     return current_user
 
 @router.put("/users/me", response_model=schemas.UserResponse)

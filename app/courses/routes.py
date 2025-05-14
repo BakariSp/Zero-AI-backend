@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
+import logging
 
 from app.db import SessionLocal
 from app.auth.jwt import get_current_active_user
-from app.models import User, Course, UserCourse
+from app.models import User, Course, UserCourse, UserLearningPath, LearningPath
 from app.courses.schemas import (
     CourseCreate,
     CourseResponse,
@@ -24,6 +25,8 @@ from app.courses.crud import (
     assign_course_to_user,
     update_user_course_progress
 )
+from app.achievements.crud import check_completion_achievements
+from app.progress.utils import update_learning_path_progress_based_on_courses
 
 router = APIRouter()
 
@@ -143,6 +146,7 @@ def add_course_to_user(
 def update_user_course(
     course_id: int,
     user_course_update: UserCourseUpdate,
+    update_learning_paths: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -154,6 +158,10 @@ def update_user_course(
             detail="Course not found for this user"
         )
     
+    # Check if course is being completed (either by progress or completed_at)
+    course_completed = False
+    old_progress = user_course.progress
+    
     # Update progress if provided
     if user_course_update.progress is not None:
         user_course = update_user_course_progress(
@@ -162,12 +170,29 @@ def update_user_course(
             course_id=course_id,
             progress=user_course_update.progress
         )
+        if user_course.progress >= 100.0:
+            course_completed = True
     
     # Update completed_at if provided
     if user_course_update.completed_at is not None:
         user_course.completed_at = user_course_update.completed_at
         db.commit()
         db.refresh(user_course)
+        course_completed = True
+    
+    # If progress has changed and update_learning_paths is True, update related learning paths
+    if update_learning_paths and user_course_update.progress is not None and user_course_update.progress != old_progress:
+        path_progresses = update_learning_path_progress_based_on_courses(
+            db=db,
+            user_id=current_user.id,
+            course_id=course_id
+        )
+        if path_progresses:
+            logging.info(f"Updated progress for {len(path_progresses)} learning paths")
+    
+    # Check for achievements if course was completed
+    if course_completed:
+        check_completion_achievements(db, user_id=current_user.id)
     
     return user_course
 

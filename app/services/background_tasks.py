@@ -70,7 +70,8 @@ async def generate_cards_background(
                 planner_service.generate_cards_for_learning_path(
                     db=db,
                     learning_path_structure=learning_path_structure,
-                    progress_callback=lambda completed: update_task_progress(task_id, completed)
+                    progress_callback=lambda completed: update_task_progress(task_id, completed),
+                    user_id=user_id
                 ),
                 timeout=timeout_seconds
             )
@@ -191,7 +192,8 @@ async def generate_full_learning_path_background(
             planner_service.generate_cards_for_learning_path(
                 db=db,
                 learning_path_structure=path_structure_result, # Pass the full structure
-                progress_callback=card_progress_callback
+                progress_callback=card_progress_callback,
+                user_id=user_id
             ),
             timeout=card_timeout
         )
@@ -533,6 +535,20 @@ async def _run_structured_path_creation_task(
                         next_order = _get_next_card_order_in_section(db, section_id)
                         from app.sections.crud import add_card_to_section
                         add_card_to_section(db, section_id, card_db.id, next_order)
+                        
+                        # Auto-associate the card with the user in user_cards table
+                        # for tracking progress and personalization
+                        try:
+                            from app.cards.crud import save_card_for_user
+                            save_card_for_user(
+                                db=db, 
+                                user_id=user_id, 
+                                card_id=card_db.id,
+                                recommended_by="AI Generator"
+                            )
+                            logging.info(f"Task {task_id}: Linked card ID {card_db.id} to user {user_id} in user_cards table")
+                        except Exception as user_card_err:
+                            logging.error(f"Task {task_id}: Failed to link card {card_db.id} to user {user_id}: {user_card_err}", exc_info=True)
                         
                         cards_saved += 1
                         total_cards_generated += 1

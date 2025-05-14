@@ -65,32 +65,17 @@ origins = [origin for origin in origins if origin]
 @app.middleware("http")
 async def options_middleware(request: Request, call_next):
     if request.method == "OPTIONS":
-        # For CORS preflight requests, return an empty 200 response with appropriate CORS headers
-        origin = request.headers.get("Origin", "")
-        path = request.url.path
+        # For CORS preflight requests, return a minimal 200 response
+        log.info(f"OPTIONS middleware handling request to: {request.url.path}")
         
-        log.info(f"OPTIONS request received for path: {path}")
-        log.info(f"OPTIONS request headers: {request.headers}")
-        
-        # Create a response with appropriate CORS headers
+        # Create a minimal response
         response = Response(status_code=200)
         
-        # Check if the origin is in the allowed origins
-        if origin in origins or "*" in origins:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            log.info(f"Setting Access-Control-Allow-Origin: {origin}")
-        elif len(origins) > 0:
-            response.headers["Access-Control-Allow-Origin"] = origins[0]
-            log.info(f"Setting Access-Control-Allow-Origin: {origins[0]} (default)")
-            
-        # Add other CORS headers
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With, Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Max-Age"] = "86400"  # Cache preflight response for 24 hours
+        # Set basic CORS headers
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "*"
         
-        log.info(f"Handling OPTIONS preflight request for path: {path}, origin: {origin}")
-        log.info(f"Response headers: {response.headers}")
         return response
         
     return await call_next(request)
@@ -116,11 +101,22 @@ log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")
 # Configure CORS - should be early in the middleware stack
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Use our defined origins list
+    allow_origins=["*"],  # For debugging, allow all origins
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With", "Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"],
-    expose_headers=["Content-Length", "Content-Type"],
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=[
+        "Content-Type", 
+        "Authorization", 
+        "Accept", 
+        "X-Requested-With", 
+        "Origin", 
+        "Access-Control-Request-Method", 
+        "Access-Control-Request-Headers",
+        "X-CSRF-Token",
+        "X-MS-CLIENT-PRINCIPAL",
+        "*"  # Allow all headers for debugging
+    ],
+    expose_headers=["*"],  # Expose all headers
     max_age=86400,  # Cache preflight response for 24 hours
 )
 
@@ -163,6 +159,8 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 async def add_user_to_request(request: Request, call_next):
     # Skip authentication for OPTIONS requests
     if request.method == "OPTIONS":
+        logging.info(f"Authentication middleware skipping OPTIONS request to: {request.url.path}")
+        # For OPTIONS, just call next middleware without doing any auth
         return await call_next(request)
     
     # Log the requested path to help with debugging
@@ -227,13 +225,19 @@ app.json_encoder = CustomJSONEncoder
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+# Add a global OPTIONS handler to handle all preflight requests
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """
+    Global handler for OPTIONS requests to any path.
+    This ensures we always return a 200 OK for OPTIONS preflight requests.
+    """
+    log.info(f"Global OPTIONS handler called for path: /{path}")
+    return Response(status_code=200)
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Zero AI API"}
-
-@app.get("/users/me", response_model=UserResponse)
-async def read_users_me(current_user: User = Depends(get_current_active_user)):
-    return current_user
 
 # When running in production, use:
 # uvicorn main:app --host 0.0.0.0 --port $PORT

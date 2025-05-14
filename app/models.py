@@ -276,6 +276,7 @@ class UserSection(Base):
     section_template_id = Column(Integer, ForeignKey("course_sections.id"), nullable=True)  # 来源模板
     title = Column(String(255))
     description = Column(Text, nullable=True)
+    progress = Column(Float, default=0.0)  # 0.0 to 100.0
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     

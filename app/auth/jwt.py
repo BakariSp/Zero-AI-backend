@@ -23,7 +23,9 @@ class CustomOAuth2PasswordBearer(OAuth2PasswordBearer):
     async def __call__(self, request: Request):
         # Skip token validation for OPTIONS requests
         if request.method == "OPTIONS":
-            print(f"OPTIONS request detected in OAuth2 scheme for path: {request.url.path}")
+            logging.info(f"OPTIONS request detected in OAuth2 scheme for path: {request.url.path}")
+            logging.info(f"Skipping token validation for OPTIONS request to: {request.url.path}")
+            logging.info(f"Request headers for OPTIONS: {request.headers}")
             return None
             
         # Get the Authorization header
@@ -41,7 +43,9 @@ class CustomOAuth2PasswordBearer(OAuth2PasswordBearer):
             
         # For standard requests with Authorization header, use the parent class implementation
         try:
-            return await super().__call__(request)
+            result = await super().__call__(request)
+            logging.info(f"Successfully validated token for {request.url.path}")
+            return result
         except Exception as e:
             logging.error(f"Error in OAuth2 scheme for path {request.url.path}: {str(e)}")
             # For get_current_user_optional, we'll return None in the function itself
@@ -116,11 +120,25 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         raise credentials_exception
     return user
 
-async def get_current_active_user(current_user = Depends(get_current_user)):
-    # Handle the case when current_user is None (for OPTIONS requests)
+async def get_current_active_user(current_user = Depends(get_current_user), request: Request = None):
+    # Special handling for OPTIONS requests
+    if request and request.method == "OPTIONS":
+        logging.info("OPTIONS request detected in get_current_active_user")
+        # For OPTIONS, we bypass authentication entirely to avoid CORS preflight issues
+        return None
+    
+    # For debugging purposes
+    if request:
+        logging.info(f"Request method in get_current_active_user: {request.method}")
+    
+    # Handle the case when current_user is None (for other requests)
     if current_user is None:
         # Log that the user wasn't authenticated and return 401
         logging.warning("Authentication failed: current_user is None")
+        if request and request.method == "OPTIONS":
+            logging.info("Not raising exception for OPTIONS request")
+            return None
+        logging.warning("Note: If this is an OPTIONS request, this exception will cause a 401 response")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",

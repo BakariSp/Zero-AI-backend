@@ -9,6 +9,7 @@ class CardInSection(BaseModel):
     card: CardResponse
     order_index: int
     is_custom: Optional[bool] = False
+    is_completed: Optional[bool] = False  # Track if the card is completed by the user
 
 # 添加卡片到章节
 class CardInSectionCreate(BaseModel):
@@ -65,12 +66,14 @@ class UserSectionCreate(SectionBase):
 class UserSectionUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    progress: Optional[float] = None
 
 # 用户自定义章节响应
 class UserSectionResponse(SectionBase):
     id: int
     user_id: int
     section_template_id: Optional[int] = None
+    progress: float = 0.0
     created_at: datetime
     updated_at: datetime
     cards: Optional[List[CardInSection]] = None

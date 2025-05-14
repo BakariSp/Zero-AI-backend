@@ -1,19 +1,28 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import desc, func, or_, and_
 from typing import List, Dict, Any, Optional
 from fastapi import HTTPException, status
 import logging
 from datetime import datetime
+from sqlalchemy.sql import text
 
-from app.models import LearningPath, CourseSection, UserLearningPath, User, Course, learning_path_courses, course_section_association
+from app.models import (
+    LearningPath, CourseSection, UserLearningPath, User, Course, 
+    learning_path_courses, course_section_association, UserSection,
+    section_cards, Card, user_section_cards, UserCourse
+)
 from app.backend_tasks.models import UserTask
 from app.learning_paths.schemas import LearningPathCreate, CourseSectionCreate
 from sqlalchemy.orm import joinedload, selectinload
 from app.users.crud import check_subscription_limits
 from app.user_daily_usage.crud import increment_usage
-from sqlalchemy import func
 
 def get_learning_path(db: Session, path_id: int) -> Optional[LearningPath]:
-    return db.query(LearningPath).filter(LearningPath.id == path_id).first()
+    """Get a learning path by ID with eager loading of courses."""
+    return db.query(LearningPath).options(
+        selectinload(LearningPath.courses),
+        selectinload(LearningPath.sections)
+    ).filter(LearningPath.id == path_id).first()
 
 def get_learning_paths(
     db: Session, 
@@ -102,7 +111,20 @@ def get_user_learning_paths(db: Session, user_id: int) -> List[UserLearningPath]
     return [path for path in user_paths if path.learning_path]
 
 def get_user_learning_path(db: Session, user_id: int, path_id: int) -> Optional[UserLearningPath]:
-    return db.query(UserLearningPath).filter(
+    """
+    Get a specific learning path for a user, including all related data needed for progress information.
+    Uses efficient eager loading strategies to minimize database queries.
+    """
+    # Use specific selectinload options to load exactly what we need
+    return db.query(UserLearningPath).options(
+        selectinload(UserLearningPath.learning_path).options(
+            selectinload(LearningPath.courses).options(
+                selectinload(Course.sections).options(
+                    selectinload(CourseSection.cards)
+                )
+            )
+        )
+    ).filter(
         UserLearningPath.user_id == user_id,
         UserLearningPath.learning_path_id == path_id
     ).first()
@@ -121,6 +143,14 @@ def assign_learning_path_to_user(db: Session, user_id: int, learning_path_id: in
     if existing:
         return existing
     
+    # Fetch the learning path template with its courses to create UserCourse entries
+    learning_path_template = get_learning_path(db, learning_path_id)
+    if not learning_path_template:
+        # This case should ideally not be hit if learning_path_id is validated upstream
+        # or if there's a foreign key constraint on UserLearningPath.learning_path_id
+        logging.error(f"Learning path template with ID {learning_path_id} not found during assignment to user {user_id}.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Learning path template not found")
+
     # Create new association
     user_path = UserLearningPath(
         user_id=user_id,
@@ -132,6 +162,33 @@ def assign_learning_path_to_user(db: Session, user_id: int, learning_path_id: in
     )
     
     db.add(user_path)
+    # db.flush() # Not strictly needed here as user_path.id isn't immediately used for UserCourse
+
+    # ADDED: Create UserCourse records for all courses in this learning path
+    if learning_path_template.courses:
+        for course_template in learning_path_template.courses:
+            # Check if UserCourse already exists for this user and course_template.id
+            # This avoids attempting to create duplicates if the assignment logic is ever re-run
+            # or if UserCourses could be created by another process.
+            existing_user_course = db.query(UserCourse).filter(
+                UserCourse.user_id == user_id,
+                UserCourse.course_id == course_template.id
+            ).first()
+
+            if not existing_user_course:
+                user_course = UserCourse(
+                    user_id=user_id,
+                    course_id=course_template.id, # Link to the template course ID
+                    progress=0.0,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                    # Add other fields if UserCourse model has them and they need initialization
+                )
+                db.add(user_course)
+                logging.info(f"Created UserCourse for user {user_id}, course_template_id {course_template.id} during LP assignment.")
+            else:
+                logging.info(f"UserCourse already exists for user {user_id}, course_template_id {course_template.id}. Skipping creation.")
+
     db.commit()
     db.refresh(user_path)
     
@@ -226,6 +283,9 @@ def clone_learning_path_for_user(
         
         original_courses = courses_query.all()
         
+        # Track all cards to create user_cards entries
+        all_card_ids = []
+        
         # Clone each course and maintain order
         for i, original_course in enumerate(original_courses):
             # Create a copy of the course
@@ -240,6 +300,19 @@ def clone_learning_path_for_user(
             db.add(new_course)
             db.flush()  # Get the new course ID
             
+            # ADDED: Create a UserCourse entry for the new course
+            user_course = UserCourse(
+                user_id=user_id,
+                course_id=new_course.id,
+                progress=0.0,
+                # Ensure other necessary fields like created_at, updated_at are set if your model requires them
+                # For example, if they don't have default values in the model:
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+            db.add(user_course)
+            # db.flush() # Optional: if you need user_course.id immediately after
+
             # Associate the new course with the new learning path
             db.execute(
                 learning_path_courses.insert().values(
@@ -284,9 +357,42 @@ def clone_learning_path_for_user(
                     )
                 )
                 
-                # Get cards associated with the original section
-                from app.models import section_cards, Card
+                # ADDED: Create a corresponding entry in user_sections table
+                user_section = UserSection(
+                    id=new_section.id,  # Explicitly set ID to match the template section
+                    user_id=user_id,
+                    section_template_id=new_section.id,  # Link to the new section as template
+                    title=new_section.title,
+                    description=new_section.description,
+                    progress=0.0,
+                    created_at=datetime.now(),
+                    updated_at=datetime.now()
+                )
+
+                # Check if an ID conflict exists before adding
+                existing_id_conflict = db.query(UserSection).filter(
+                    UserSection.id == new_section.id
+                ).first()
+
+                if existing_id_conflict:
+                    # There's already a user section with this ID - use auto-increment instead
+                    logging.warning(f"ID conflict: UserSection ID {new_section.id} already exists. Using auto-increment instead.")
+                    
+                    # Remove the explicit ID so SQLAlchemy will use auto-increment
+                    user_section = UserSection(
+                        user_id=user_id,
+                        section_template_id=new_section.id,
+                        title=new_section.title,
+                        description=new_section.description,
+                        progress=0.0,
+                        created_at=datetime.now(),
+                        updated_at=datetime.now()
+                    )
+
+                db.add(user_section)
+                db.flush()
                 
+                # Get cards associated with the original section
                 cards_query = db.query(Card).join(
                     section_cards,
                     section_cards.c.card_id == Card.id
@@ -315,6 +421,9 @@ def clone_learning_path_for_user(
                     db.add(new_card)
                     db.flush()  # Get the new card ID
                     
+                    # Keep track of card IDs to create user_cards entries
+                    all_card_ids.append(new_card.id)
+                    
                     # Get the original order_index
                     order_data = db.query(section_cards.c.order_index).filter(
                         section_cards.c.section_id == original_section.id,
@@ -331,6 +440,16 @@ def clone_learning_path_for_user(
                             order_index=order_index
                         )
                     )
+                    
+                    # ADDED: Associate the card with the user section as well
+                    db.execute(
+                        user_section_cards.insert().values(
+                            user_section_id=user_section.id,
+                            card_id=new_card.id,
+                            order_index=order_index,
+                            is_custom=False
+                        )
+                    )
         
         # Create the user learning path association
         user_path = UserLearningPath(
@@ -342,6 +461,25 @@ def clone_learning_path_for_user(
             updated_at=datetime.now()
         )
         db.add(user_path)
+        
+        # Create user_cards entries for all cards
+        if all_card_ids:
+            for card_id in all_card_ids:
+                db.execute(
+                    text("""
+                    INSERT INTO user_cards (
+                        user_id, card_id, is_completed, saved_at
+                    ) VALUES (
+                        :user_id, :card_id, :is_completed, NOW()
+                    )
+                    """),
+                    {
+                        "user_id": user_id,
+                        "card_id": card_id,
+                        "is_completed": False  # Initialize as not completed
+                    }
+                )
+            logging.info(f"Created {len(all_card_ids)} user_card entries for user {user_id}")
         
         # Commit the transaction
         db.commit()

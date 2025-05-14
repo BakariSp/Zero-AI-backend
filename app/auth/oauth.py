@@ -151,6 +151,28 @@ oauth.register(
     client_kwargs={"scope": "openid email profile"},
 )
 
+# Add helper function to determine frontend URL based on header
+def get_frontend_url(request: Request, fallback_url: str) -> str:
+    """
+    Determine the correct frontend URL to use in redirects.
+    Checks for X-Force-Local-Frontend header for local development integration.
+    """
+    # Check if local frontend development with remote API
+    force_local_frontend = request.headers.get("X-Force-Local-Frontend") == "true"
+    
+    if force_local_frontend:
+        log.info("X-Force-Local-Frontend header detected, redirecting to local frontend")
+        return LOCAL_FRONTEND_URL
+    
+    # Check if there's a frontend_url override parameter
+    frontend_url_override = request.query_params.get("frontend_url")
+    if frontend_url_override:
+        log.info(f"Using frontend URL override: {frontend_url_override}")
+        return frontend_url_override
+    
+    # Use the fallback URL (typically the auto-detected FRONTEND_URL)
+    return fallback_url
+
 # OAuth login routes
 @router.get("/google")
 async def login_via_google(request: Request):
@@ -191,6 +213,7 @@ async def auth_via_google(request: Request):
         log.info(f"Callback URL: {request.url}")
         log.info(f"Query parameters: {dict(request.query_params)}")
         log.info(f"Session contents: {dict(request.session)}")
+        log.info(f"Request headers: {dict(request.headers)}")
         
         # Check if we're in production or local
         is_local = "localhost" in str(request.base_url)
@@ -199,12 +222,8 @@ async def auth_via_google(request: Request):
         received_state = request.query_params.get("state")
         expected_state = request.session.get("google_oauth_state")
         
-        # Check if there's a frontend_url override parameter
-        frontend_url_override = request.query_params.get("frontend_url")
-        actual_frontend_url = frontend_url_override or FRONTEND_URL
-        
-        if frontend_url_override:
-            log.info(f"Using frontend URL override: {frontend_url_override}")
+        # Determine frontend URL using helper function
+        actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
         
         log.info(f"Received state: {received_state}")
         log.info(f"Expected state from session: {expected_state}")
@@ -424,9 +443,8 @@ async def auth_via_google(request: Request):
         log.error(f"Google OAuth callback error: {str(e)}")
         # Redirect to frontend error page
         
-        # Check if there's a frontend_url override parameter
-        frontend_url_override = request.query_params.get("frontend_url")
-        actual_frontend_url = frontend_url_override or FRONTEND_URL
+        # Determine frontend URL using helper function
+        actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
         
         error_url = f"{actual_frontend_url}/oauth/error?message={str(e)}"
         return RedirectResponse(url=error_url)
@@ -538,12 +556,8 @@ async def auth_via_microsoft(request: Request):
         received_state = request.query_params.get("state")
         expected_state = request.session.get("microsoft_oauth_state")
         
-        # Check if there's a frontend_url override parameter
-        frontend_url_override = request.query_params.get("frontend_url")
-        actual_frontend_url = frontend_url_override or FRONTEND_URL
-        
-        if frontend_url_override:
-            log.info(f"Using frontend URL override: {frontend_url_override}")
+        # Determine frontend URL using helper function
+        actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
         
         # Log details for debugging
         log.info(f"Microsoft OAuth callback received")
@@ -552,6 +566,7 @@ async def auth_via_microsoft(request: Request):
         log.info(f"Expected state from session: {expected_state}")
         log.info(f"Session contents: {dict(request.session)}")
         log.info(f"Request cookies: {dict(request.cookies)}")
+        log.info(f"Request headers: {dict(request.headers)}")
         log.info(f"Frontend URL for redirect: {actual_frontend_url}")
         
         if not code:
@@ -797,9 +812,8 @@ async def auth_via_microsoft(request: Request):
         log.error(f"Microsoft callback error: {str(e)}")
         # Redirect to frontend error page
         
-        # Check if there's a frontend_url override parameter
-        frontend_url_override = request.query_params.get("frontend_url")
-        actual_frontend_url = frontend_url_override or FRONTEND_URL
+        # Determine frontend URL using helper function
+        actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
         
         error_url = f"{actual_frontend_url}/oauth/error?message={str(e)}"
         return RedirectResponse(url=error_url)
@@ -830,8 +844,9 @@ async def auth_via_microsoft_prod(request: Request):
     if not code:
         log.error("Missing code parameter in production callback")
         
-        # Use the override or default frontend URL
-        actual_frontend_url = frontend_url_override or FRONTEND_URL
+        # Determine frontend URL using helper function
+        actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
+        
         error_url = f"{actual_frontend_url}/oauth/error?message=Missing+code+parameter"
         return RedirectResponse(url=error_url)
     
@@ -1442,12 +1457,15 @@ async def debug_redirect_uris(request: Request):
         "instructions": "Verify these URIs match what's configured in Google Cloud Console and Microsoft Azure"
     }
 
-# Add a test endpoint to check frontend URL redirect
+# Update test endpoint to check frontend URL redirect
 @router.get("/test-frontend-redirect")
 async def test_frontend_redirect(request: Request):
     """Test endpoint that redirects to the frontend URL"""
-    log.info(f"Testing frontend URL redirect to: {FRONTEND_URL}")
-    redirect_url = f"{FRONTEND_URL}/oauth/callback?test=true&from=backend"
+    # Determine frontend URL using helper function
+    actual_frontend_url = get_frontend_url(request, FRONTEND_URL)
+    
+    log.info(f"Testing frontend URL redirect to: {actual_frontend_url}")
+    redirect_url = f"{actual_frontend_url}/oauth/callback?test=true&from=backend"
     return RedirectResponse(url=redirect_url)
 
 # Add a more detailed OAuth debugging endpoint
@@ -1472,7 +1490,7 @@ async def oauth_debug(request: Request):
     is_local = "localhost" in str(request.base_url)
     
     # Check what URL would be used for frontend redirect
-    current_frontend = FRONTEND_URL
+    current_frontend = get_frontend_url(request, FRONTEND_URL)
     
     # Test if redirect URLs are reachable
     import httpx
@@ -1483,7 +1501,7 @@ async def oauth_debug(request: Request):
     try:
         async with httpx.AsyncClient() as client:
             # Set a short timeout
-            response = await client.get(FRONTEND_URL, timeout=5.0, follow_redirects=True)
+            response = await client.get(current_frontend, timeout=5.0, follow_redirects=True)
             status_code = response.status_code
             frontend_reachable = 200 <= status_code < 400
     except Exception as e:
@@ -1491,7 +1509,7 @@ async def oauth_debug(request: Request):
     
     # Create a test token for testing redirect
     test_token = "TEST_TOKEN_FOR_DEBUGGING"
-    test_redirect_url = f"{FRONTEND_URL}/oauth/callback?token={test_token}&is_new_user=false&debug=true"
+    test_redirect_url = f"{current_frontend}/oauth/callback?token={test_token}&is_new_user=false&debug=true"
     
     # Return comprehensive debug info
     return {
@@ -1500,7 +1518,8 @@ async def oauth_debug(request: Request):
             "base_url": str(request.base_url),
             "is_local": is_local,
             "host_header": hostname,
-            "headers": headers
+            "headers": headers,
+            "force_local_frontend": headers.get("X-Force-Local-Frontend") == "true"
         },
         "frontend_url_config": {
             "current_frontend_url": current_frontend,
@@ -1520,7 +1539,7 @@ async def oauth_debug(request: Request):
             "error": error_message
         },
         "test_urls": {
-            "frontend_url": FRONTEND_URL,
+            "frontend_url": current_frontend,
             "test_redirect": test_redirect_url,
             "frontend_test_endpoint": f"{request.base_url}oauth/test-frontend-redirect"
         },
@@ -1528,11 +1547,17 @@ async def oauth_debug(request: Request):
         "recommendation": "If using the wrong frontend URL, set the FRONTEND_URL environment variable in Azure App Service Configuration"
     }
 
-# Add a test endpoint for direct frontend URL testing
+# Update test endpoint for direct frontend URL testing
 @router.get("/test-redirect-to")
 async def test_redirect_to(request: Request):
     """Test endpoint that redirects to any URL provided as a parameter"""
-    url = request.query_params.get("url", FRONTEND_URL)
+    # Get URL from query parameter, but use helper function if not provided
+    param_url = request.query_params.get("url")
+    if param_url:
+        url = param_url
+    else:
+        url = get_frontend_url(request, FRONTEND_URL)
+        
     log.info(f"Testing direct redirect to: {url}")
     
     # If URL doesn't have a scheme, add https://

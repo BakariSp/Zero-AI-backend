@@ -14,7 +14,7 @@ from app.services.ai_generator import (
 from app.learning_paths.schemas import LearningPathCreate
 from app.courses.schemas import CourseCreate
 from app.learning_paths.crud import create_learning_path, assign_learning_path_to_user
-from app.cards.crud import create_card
+from app.cards.crud import create_card, save_card_for_user
 from app.courses.crud import create_course, add_section_to_course
 from app.sections.crud import create_section, add_card_to_section
 from app.utils.url_validator import get_valid_resources  # Import the URL validator
@@ -158,11 +158,19 @@ class LearningPathPlannerService:
         db: Session,
         learning_path_structure: Dict[str, Any],
         progress_callback: Optional[callable] = None,
-        cards_per_section: int = 4 # Define how many cards per section
+        cards_per_section: int = 4, # Define how many cards per section
+        user_id: Optional[int] = None  # Add user_id parameter
     ) -> List[Dict[str, Any]]:
         """
         Generate a fixed number of cards for each section in a learning path structure.
         Uses generate_multiple_cards_from_topic based on section title.
+        
+        Args:
+            db: Database session
+            learning_path_structure: Structure of learning path with courses and sections
+            progress_callback: Optional callback for progress updates
+            cards_per_section: Number of cards to generate per section
+            user_id: Optional user ID to associate cards with in user_cards table
         """
         section_tasks = []
         section_contexts = [] # To store section_id for linking cards later
@@ -269,6 +277,19 @@ class LearningPathPlannerService:
                      add_card_to_section(db, section_id, card_db.id, current_order + 1)
                      card_order_in_section[section_id] += 1 # Increment order for the next card in this section
 
+                     # Associate card with user in user_cards table if user_id provided
+                     if user_id:
+                         try:
+                             save_card_for_user(
+                                 db=db, 
+                                 user_id=user_id, 
+                                 card_id=card_db.id,
+                                 recommended_by="Learning Path Generator"
+                             )
+                             logging.info(f"Associated card {card_db.id} with user {user_id} in user_cards table")
+                         except Exception as user_card_err:
+                             logging.error(f"Failed to associate card {card_db.id} with user {user_id}: {user_card_err}", exc_info=True)
+
                      # Add to result list
                      result_cards.append({
                          "card_id": card_db.id,
@@ -292,9 +313,19 @@ class LearningPathPlannerService:
         db: Session,
         learning_path_structure: Dict[str, Any],
         cards_per_section: int,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        user_id: Optional[int] = None  # Add user_id parameter
     ):
-        """Generate cards for a learning path with predefined course/section structure"""
+        """
+        Generate cards for a learning path with predefined course/section structure
+        
+        Args:
+            db: Database session
+            learning_path_structure: Structure of learning path with courses and sections
+            cards_per_section: Number of cards to generate per section
+            progress_callback: Optional callback for progress updates
+            user_id: Optional user ID to associate cards with in user_cards table
+        """
         # Get path data for context
         path_id = learning_path_structure.get("id")
         path_title = learning_path_structure.get("title")
@@ -365,6 +396,19 @@ class LearningPathPlannerService:
                         
                         # Associate with section
                         add_card_to_section(db, section_id, card_db.id)
+                        
+                        # Associate card with user in user_cards table if user_id provided
+                        if user_id:
+                            try:
+                                save_card_for_user(
+                                    db=db, 
+                                    user_id=user_id, 
+                                    card_id=card_db.id,
+                                    recommended_by="Structured Learning Path"
+                                )
+                                logging.info(f"Associated card {card_db.id} with user {user_id} in user_cards table")
+                            except Exception as user_card_err:
+                                logging.error(f"Failed to associate card {card_db.id} with user {user_id}: {user_card_err}", exc_info=True)
                         
                         created_cards.append({
                             "id": card_db.id,

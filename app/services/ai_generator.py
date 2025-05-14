@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import List
 from app.utils.url_validator import get_valid_resources  # Import the URL validator
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -376,6 +377,54 @@ class LearningPathPlannerAgent(BaseAgent):
 class CardGeneratorAgent(BaseAgent):
     """Agent responsible for generating detailed card content from keywords"""
     
+    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+        super().__init__(client, deployment)
+        # Keep a cache of recently generated cards to avoid repetition
+        self._recent_card_cache = {}
+        
+    def _is_duplicate_card(self, new_card: Dict[str, Any], existing_cards: List[Dict[str, Any]]) -> bool:
+        """
+        Check if a new card is a duplicate of any existing card.
+        
+        Args:
+            new_card: The newly generated card to check
+            existing_cards: List of previously generated cards
+            
+        Returns:
+            bool: True if the card is a duplicate, False otherwise
+        """
+        if not existing_cards:
+            return False
+            
+        new_keyword = new_card.get('keyword', '').lower()
+        new_question = new_card.get('question', '').lower()
+        
+        # Check for duplicate keywords or very similar questions
+        for card in existing_cards:
+            # Check for exact keyword match
+            if new_keyword == card.get('keyword', '').lower():
+                logging.info(f"Duplicate card detected: same keyword '{new_keyword}'")
+                return True
+                
+            # Check for very similar questions (80% similarity)
+            existing_question = card.get('question', '').lower()
+            if existing_question and new_question:
+                # Simple word overlap calculation
+                new_words = set(new_question.split())
+                existing_words = set(existing_question.split())
+                
+                if len(new_words) > 0 and len(existing_words) > 0:
+                    common_words = new_words.intersection(existing_words)
+                    similarity = len(common_words) / max(len(new_words), len(existing_words))
+                    
+                    if similarity > 0.8:  # 80% similarity threshold
+                        logging.info(f"Duplicate card detected: similar questions (similarity: {similarity:.2f})")
+                        logging.info(f"Q1: {new_question}")
+                        logging.info(f"Q2: {existing_question}")
+                        return True
+                        
+        return False
+            
     async def generate_card(
         self,
         keyword: str,
@@ -506,7 +555,7 @@ class CardGeneratorAgent(BaseAgent):
             "num_cards": num_cards,
             "difficulty": difficulty,
             "course": course_title,
-            "version": "1.3" # Incremented version due to prompt change
+            "version": "1.5" # Incremented version due to deduplication addition
         }
         cache_key = generate_cache_key("cards_from_topic", cache_params)
         # --- End Cache versioning ---
@@ -519,16 +568,25 @@ class CardGeneratorAgent(BaseAgent):
             context_parts.append(f"Target Difficulty: {difficulty}")
             context_str = "\n".join(context_parts) + "\n\n" if context_parts else ""
 
-            # --- Detailed Prompt for General Model ---
+            # Adjusted prompt to emphasize diversity and uniqueness
             prompt = f"""
             You are an expert educational content creator specializing in flashcards.
-            Based on the provided topic and context, generate exactly {num_cards} distinct educational flashcards.
+            Based on the provided topic and context, generate exactly {num_cards} DISTINCT educational flashcards.
+            Make sure each card covers a DIFFERENT aspect of the topic with NO REPETITION between cards.
 
             Context:
             {context_str}
             Topic: "{topic}"
             Number of cards to generate: {num_cards}
             Target Difficulty for all cards: {difficulty}
+
+            IMPORTANT: Ensure each card is UNIQUE and covers a DIFFERENT aspect of the topic.
+            
+            For example, if the topic is "Python Programming":
+            - Card 1 might be about data types
+            - Card 2 might be about functions
+            - Card 3 might be about loops
+            Each card should focus on different concepts, not repeat the same information.
 
             Format the response as a single JSON object containing a key named "cards". The value of "cards" should be a JSON list, where each element is a flashcard object.
             Each flashcard object in the list must have the following exact structure and fields:
@@ -552,86 +610,124 @@ class CardGeneratorAgent(BaseAgent):
 
             Ensure the output is ONLY the JSON object containing the 'cards' list, starting with {{ and ending with }}. Do not include any introductory text, markdown formatting, or explanations outside the JSON structure. Ensure all {num_cards} requested cards are generated.
             """
-            # --- End Detailed Prompt ---
 
             logging.debug(f"Generating multiple cards with detailed prompt:\n{prompt}")
             try:
-                response = await asyncio.to_thread( # Use asyncio.to_thread
-                    self.client.chat.completions.create, # Use self.client
-                    model=self.deployment, # Use self.deployment
+                response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
+                    model=self.deployment,
                     messages=[
-                        # System message is still useful
-                        {"role": "system", "content": "You are an expert educational content creator who outputs lists of flashcard data in JSON format."},
+                        {"role": "system", "content": "You are an expert educational content creator who outputs lists of flashcard data in JSON format. Each card MUST be unique, covering different aspects of the topic with NO repetition between cards."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.7, # Adjust temperature as needed
-                    max_tokens=300 * num_cards + 500, # Adjusted token estimate slightly
-                    response_format={"type": "json_object"} # Still request JSON
+                    temperature=0.8, # Slightly increased for more diversity
+                    max_tokens=300 * num_cards + 500,
+                    response_format={"type": "json_object"}
                 )
                 content = response.choices[0].message.content
-                logging.debug(f"Raw AI response for topic '{topic}':\n---\n{content}\n---")
                 extracted_json = self._extract_json_from_response(content)
-                logging.debug(f"Extracted JSON type for topic '{topic}': {type(extracted_json)}")
-                logging.debug(f"Extracted JSON content (first 500 chars): {str(extracted_json)[:500]}") # Log the actual extracted data
 
-                # --- Keep Robust Validation ---
-                card_list_data = None # Initialize to None
+                # --- Process and validate cards ---
+                card_list_data = None
                 if isinstance(extracted_json, dict) and "cards" in extracted_json and isinstance(extracted_json.get("cards"), list):
-                     logging.debug(f"Validation: Found 'cards' key with a list for topic '{topic}'.")
                      card_list_data = extracted_json["cards"]
                 elif isinstance(extracted_json, dict) and "flashcards" in extracted_json and isinstance(extracted_json.get("flashcards"), list):
-                     logging.debug(f"Validation: Found 'flashcards' key with a list for topic '{topic}'.")
-                     card_list_data = extracted_json["flashcards"] # Extract from 'flashcards' key
+                     card_list_data = extracted_json["flashcards"]
                 elif isinstance(extracted_json, list):
-                     logging.debug(f"Validation: Extracted JSON is a direct list for topic '{topic}'.")
                      card_list_data = extracted_json
                 else:
-                     # Log the problematic data before raising
-                     logging.error(f"Validation failed for topic '{topic}'. Extracted JSON type: {type(extracted_json)}. Value: {extracted_json}")
-                     # Update the error message slightly to reflect the accepted formats
-                     raise ValueError("Fine-tuned model response was not in the expected list, {'cards': list}, or {'flashcards': list} format.") # Updated error message
+                     raise ValueError("Fine-tuned model response was not in the expected list, {'cards': list}, or {'flashcards': list} format.")
 
                 if not card_list_data:
                     logging.warning(f"Fine-tuned model returned an empty list of cards for topic '{topic}'.")
                     return []
 
+                # --- DEDUPLICATION LOGIC ---
                 validated_cards = []
+                seen_cards = []  # Keep track of cards we've already accepted
                 required_fields = ["keyword", "question", "answer", "explanation"]
+                
                 for i, card_dict in enumerate(card_list_data):
                     if not isinstance(card_dict, dict):
-                        logging.warning(f"Skipping item {i} in list for topic '{topic}' as it's not a dictionary. Item: {card_dict}")
+                        logging.warning(f"Skipping item {i} in list for topic '{topic}' as it's not a dictionary.")
                         continue
 
                     if not all(field in card_dict for field in required_fields):
-                         logging.warning(f"Skipping card from fine-tuned model due to missing required fields for topic '{topic}'. Required: {required_fields}. Data: {card_dict}")
+                         logging.warning(f"Skipping card due to missing required fields for topic '{topic}'.")
                          continue
+                    
+                    # Check if this card is a duplicate of one we've already added
+                    if self._is_duplicate_card(card_dict, seen_cards):
+                        logging.info(f"Skipping duplicate card for keyword '{card_dict.get('keyword')}'")
+                        continue
+                    
+                    # Add to seen_cards for future duplication checks
+                    seen_cards.append(card_dict)
+                    
                     try:
+                        # Validate and enhance resources for each card
+                        from app.utils.url_validator import get_valid_resources
+                        resources = card_dict.get("resources", [])
+                        
+                        # Check if resources need validation and enhancement
+                        if not resources or not isinstance(resources, list):
+                            validated_resources = await asyncio.to_thread(
+                                get_valid_resources,
+                                keyword=card_dict.get('keyword', topic),
+                                context=topic
+                            )
+                            card_dict["resources"] = validated_resources
+                        else:
+                            validated_resources = await asyncio.to_thread(
+                                get_valid_resources,
+                                keyword=card_dict.get('keyword', topic),
+                                context=topic,
+                                existing_resources=resources
+                            )
+                            card_dict["resources"] = validated_resources
+                            
+                        # Set difficulty if not present
                         card_dict['difficulty'] = card_dict.get('difficulty', difficulty)
                         validated_cards.append(CardCreate(**card_dict))
 
                     except Exception as validation_err:
-                        logging.warning(f"Skipping card due to validation error for topic '{topic}': {validation_err}. Data: {card_dict}")
-
-                logging.info(f"Successfully validated {len(validated_cards)} cards out of {len(card_list_data)} received for topic '{topic}'.")
-                return [card.dict() for card in validated_cards] # Return list of dicts for caching
+                        logging.warning(f"Skipping card due to validation error for topic '{topic}': {validation_err}.")
+                
+                # If we filtered out too many cards due to duplication, we might need to generate more
+                if len(validated_cards) < num_cards and len(validated_cards) > 0:
+                    logging.info(f"After deduplication, only have {len(validated_cards)} cards. Needed {num_cards}.")
+                    # We could potentially call the API again to get more unique cards
+                
+                # Update global cache for this topic with these cards to avoid repetition in future calls
+                cache_key = f"topic_card_cache_{topic.lower()}"
+                if cache_key not in self._recent_card_cache:
+                    self._recent_card_cache[cache_key] = []
+                self._recent_card_cache[cache_key].extend(seen_cards)
+                
+                # Keep cache size manageable - limit to last 100 cards per topic
+                if len(self._recent_card_cache[cache_key]) > 100:
+                    self._recent_card_cache[cache_key] = self._recent_card_cache[cache_key][-100:]
+                
+                logging.info(f"Successfully validated {len(validated_cards)} unique cards for topic '{topic}'.")
+                return [card.dict() for card in validated_cards]
 
             except Exception as e:
                 logging.error(f"Error generating cards for topic '{topic}': {e}", exc_info=True)
                 raise
 
         # Get from cache or create
-        data, from_cache = await get_or_create_cached_data(cache_key, create_cards) # Pass updated key
+        data, from_cache = await get_or_create_cached_data(cache_key, create_cards)
 
         if from_cache:
             logging.info(f"Retrieved {len(data)} cards from cache for topic: {topic}")
         else:
              logging.info(f"Generated {len(data)} new cards for topic: {topic}")
 
-        # Ensure data is parsed back into CardCreate objects AFTER retrieving/generating
+        # Ensure data is parsed back into CardCreate objects
         try:
             return [CardCreate(**item) for item in data]
         except Exception as e:
-             logging.error(f"Failed to parse final CardCreate objects for key {cache_key}: {e}. Data: {data}", exc_info=True)
+             logging.error(f"Failed to parse final CardCreate objects for key {cache_key}: {e}")
              return []
 
     async def generate_cards_for_section_batch(self, section_topic: str, num_cards: int) -> List[Dict[str, Any]]:
@@ -708,13 +804,80 @@ class ParallelCardGeneratorManager:
 class LearningAssistantAgent(BaseAgent):
     """Agent responsible for answering user questions and generating related cards during learning"""
     
+    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+        super().__init__(client, deployment)
+        # Cache of previously generated card keywords for deduplication
+        self._user_card_history = {}
+        
+    def _check_for_duplicate_card(self, user_id: str, keyword: str, question: str) -> bool:
+        """
+        Check if a card with similar keyword or question has been generated for this user recently
+        
+        Args:
+            user_id: User identifier for tracking history
+            keyword: Card keyword to check for similarity
+            question: Card question to check for similarity
+            
+        Returns:
+            bool: True if the card appears to be a duplicate
+        """
+        # Initialize history for this user if needed
+        if user_id not in self._user_card_history:
+            self._user_card_history[user_id] = []
+            return False
+            
+        # Normalize inputs
+        keyword_lower = keyword.lower()
+        question_lower = question.lower()
+        
+        # Check against history
+        for card in self._user_card_history[user_id]:
+            hist_keyword = card.get('keyword', '').lower()
+            hist_question = card.get('question', '').lower()
+            
+            # Check for exact or very similar keyword
+            if keyword_lower == hist_keyword:
+                logging.info(f"Duplicate card detected for user {user_id}: same keyword '{keyword}'")
+                return True
+                
+            # For questions, check word overlap
+            q_words1 = set(question_lower.split())
+            q_words2 = set(hist_question.split())
+            
+            if len(q_words1) > 0 and len(q_words2) > 0:
+                common_words = q_words1.intersection(q_words2)
+                similarity = len(common_words) / max(len(q_words1), len(q_words2))
+                
+                if similarity > 0.7:  # 70% similarity threshold
+                    logging.info(f"Duplicate card detected for user {user_id}: similar questions (similarity: {similarity:.2f})")
+                    return True
+                    
+        return False
+        
+    def _add_to_user_history(self, user_id: str, card_data: Dict[str, Any]) -> None:
+        """Add a card to the user's history for future duplicate checking"""
+        if user_id not in self._user_card_history:
+            self._user_card_history[user_id] = []
+            
+        # Add the card data
+        self._user_card_history[user_id].append({
+            'keyword': card_data.get('keyword', ''),
+            'question': card_data.get('question', ''),
+            'time': datetime.now()  # For potential time-based cleanup later
+        })
+        
+        # Keep history manageable (last 20 cards per user)
+        if len(self._user_card_history[user_id]) > 20:
+            self._user_card_history[user_id] = self._user_card_history[user_id][-20:]
+    
     async def answer_question(
         self,
         user_query: str,
         current_card_data: Optional[Dict[str, Any]] = None,
         section_title: Optional[str] = None,
         course_title: Optional[str] = None,
-        difficulty_level: str = "intermediate"
+        difficulty_level: str = "intermediate",
+        user_id: Optional[str] = None  # Added user_id for tracking history
     ) -> Dict[str, Any]:
         """
         Answers a user question and generates a related card
@@ -725,11 +888,15 @@ class LearningAssistantAgent(BaseAgent):
             section_title: Title of the current section
             course_title: Title of the current course
             difficulty_level: Difficulty level for generated content
+            user_id: Optional user identifier for tracking history
             
         Returns:
             Dict with answer to question and a related card
         """
         try:
+            # Use a default user ID if none provided
+            user_id = user_id or "default_user"
+            
             # Build context for the prompt
             context_parts = []
             if current_card_data:
@@ -754,11 +921,35 @@ class LearningAssistantAgent(BaseAgent):
                 "section": section_title,
                 "course": course_title,
                 "difficulty": difficulty_level,
-                "version": "1.0"  # Increment if prompt changes
+                "version": "1.1"  # Increment due to deduplication change
             }
             cache_key = generate_cache_key("learning_assistant", cache_params)
             
             async def generate_response():
+                # If current card exists, we need to tell the AI to avoid similar content
+                avoid_duplication_text = ""
+                if current_card_data:
+                    avoid_duplication_text = f"""
+                    IMPORTANT: Do NOT create a related card similar to the current card. Make sure the related card:
+                    - Uses a different keyword than "{current_card_data.get('keyword')}"
+                    - Covers a different aspect of the topic
+                    - Asks a different type of question
+                    - Is not simply a reformulation of the current card
+                    """
+                
+                # Get user's card history if any
+                user_card_history = self._user_card_history.get(user_id, [])
+                recent_keywords = []
+                if user_card_history:
+                    recent_keywords = [card.get('keyword') for card in user_card_history[-5:]]  # Last 5 keywords
+                    
+                avoid_history_text = ""
+                if recent_keywords:
+                    avoid_history_text = f"""
+                    Also ensure the new card is NOT similar to these recently generated cards: 
+                    {', '.join(f'"{kw}"' for kw in recent_keywords)}
+                    """
+                
                 prompt = f"""
                 You are an educational assistant helping a user who is currently studying.
                 
@@ -771,6 +962,9 @@ class LearningAssistantAgent(BaseAgent):
                 Please provide:
                 1. A direct, helpful response to the user's question (be accurate and educational)
                 2. A related flashcard that would help deepen understanding of this topic
+                
+                {avoid_duplication_text}
+                {avoid_history_text}
                 
                 Format your entire response as a single JSON object with these fields:
                 {{
@@ -785,7 +979,7 @@ class LearningAssistantAgent(BaseAgent):
                     }}
                 }}
                 
-                Ensure your answer is educational, accurate, and helpful. The related card should explore a concept connected to the user's query but shouldn't duplicate the current card's content.
+                Ensure your answer is educational, accurate, and helpful. The related card should explore a concept connected to the user's query but shouldn't duplicate the current card's content or any recent cards.
                 """
                 
                 logging.debug(f"Generating learning assistant response with prompt:\n{prompt}")
@@ -802,7 +996,6 @@ class LearningAssistantAgent(BaseAgent):
                 )
                 
                 content = response.choices[0].message.content.strip()
-                logging.debug(f"Raw learning assistant response:\n{content}")
                 data = self._extract_json_from_response(content)
                 
                 # Validate response structure
@@ -830,6 +1023,29 @@ class LearningAssistantAgent(BaseAgent):
                         "resources": card_data.get("resources", [])
                     }
                 
+                # Check for duplicate with current card
+                if current_card_data and current_card_data.get("keyword") == data["related_card"].get("keyword"):
+                    logging.warning(f"AI generated a duplicate keyword: {data['related_card'].get('keyword')}")
+                    # Modify the keyword to avoid exact duplication
+                    data["related_card"]["keyword"] = f"Advanced {data['related_card'].get('keyword')}"
+                
+                # Check if this is a duplicate of a recently generated card
+                if self._check_for_duplicate_card(
+                    user_id=user_id, 
+                    keyword=data["related_card"].get("keyword", ""), 
+                    question=data["related_card"].get("question", "")
+                ):
+                    logging.info(f"Detected duplicate card for user {user_id} - adding variation to keyword")
+                    # Add a modifier to make it different
+                    original_keyword = data["related_card"].get("keyword", "")
+                    modifiers = ["Advanced", "Extended", "In-depth", "Practical", "Theoretical"]
+                    import random
+                    modifier = random.choice(modifiers)
+                    data["related_card"]["keyword"] = f"{modifier} {original_keyword}"
+                
+                # Add to user history for future duplicate checking
+                self._add_to_user_history(user_id, data["related_card"])
+                
                 return data
             
             # Get from cache or create
@@ -837,6 +1053,9 @@ class LearningAssistantAgent(BaseAgent):
             
             if from_cache:
                 logging.info(f"Retrieved learning assistant response from cache for query: {user_query[:50]}...")
+                # Still add to history even if from cache
+                if "related_card" in data and isinstance(data["related_card"], dict):
+                    self._add_to_user_history(user_id, data["related_card"])
             
             return data
         

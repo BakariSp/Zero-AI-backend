@@ -1,9 +1,8 @@
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
-from app.courses.schemas import CourseResponse
-from pydantic import BaseModel
-from typing import List
+from app.courses.schemas import CourseResponse, UserCourseResponse
+from app.sections.schemas import SectionResponse
 
 class CourseSectionBase(BaseModel):
     title: str
@@ -19,6 +18,40 @@ class CourseSectionUpdate(BaseModel):
     description: Optional[str] = None
     order_index: Optional[int] = None
     estimated_days: Optional[int] = None
+
+# New model for card progress status
+class CardProgressStatus(BaseModel):
+    id: int
+    is_completed: bool
+    title: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+# For user-specific section with progress info
+class UserSectionInfo(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    progress: float = 0.0
+    cards: List[CardProgressStatus] = []
+    user_section_id: Optional[int] = None
+    section_template_id: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
+# For user-specific course with progress info
+class UserCourseInfo(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    progress: float = 0.0
+    completed_at: Optional[datetime] = None
+    sections: List[UserSectionInfo] = []
+    
+    class Config:
+        from_attributes = True
 
 class LearningPathBase(BaseModel):
     title: str
@@ -47,12 +80,22 @@ class CourseSectionResponse(CourseSectionBase):
     class Config:
         from_attributes = True
 
+# Add a minimal Course response schema if one doesn't exist in imported schemas
+class CourseBaseResponse(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    estimated_days: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
 class LearningPathResponse(LearningPathBase):
     id: int
-    sections: List[CourseSectionResponse]
+    sections: List[CourseSectionResponse] = []
     created_at: datetime
     updated_at: datetime
-    courses: List[CourseResponse] = []
+    courses: List[UserCourseInfo] = []
 
     class Config:
         from_attributes = True

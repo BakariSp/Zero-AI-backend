@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import logging
 from sqlalchemy.sql import text
 import asyncio
@@ -29,7 +29,8 @@ from app.cards.crud import (
     save_card_for_user,
     update_user_card,
     remove_card_from_user,
-    remove_card_from_user_learning_path
+    remove_card_from_user_learning_path,
+    get_user_card_by_id
 )
 from app.services.ai_generator import (
     generate_card_with_ai,
@@ -37,6 +38,8 @@ from app.services.ai_generator import (
 )
 from app.setup import increment_user_resource_usage, get_user_remaining_resources
 from app.utils.url_validator import is_valid_url, get_valid_resources  # Import the validators
+from app.achievements.crud import check_completion_achievements
+from app.progress.utils import cascade_progress_update
 
 router = APIRouter()
 
@@ -190,25 +193,91 @@ def save_card(
         depth_preference=depth_preference,
         recommended_by=recommended_by
     )
+    
+@router.get("/users/me/cards/{card_id}", response_model=UserCardResponse)
+def get_saved_card(
+    card_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get a saved card for the current user"""
+    card = get_user_card_by_id(db, user_id=current_user.id, card_id=card_id)
+    return card
 
 @router.put("/users/me/cards/{card_id}", response_model=UserCardResponse)
-def update_saved_card(
+async def update_saved_card(
     card_id: int,
     user_card: UserCardUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Update a saved card for the current user"""
-    return update_user_card(
-        db=db,
-        user_id=current_user.id,
-        card_id=card_id,
-        is_completed=user_card.is_completed,
-        expanded_example=user_card.expanded_example,
-        notes=user_card.notes,
-        difficulty_rating=user_card.difficulty_rating,
-        depth_preference=user_card.depth_preference
-    )
+    try:
+        # First try to update directly
+        try:
+            result = update_user_card(
+                db=db,
+                user_id=current_user.id,
+                card_id=card_id,
+                is_completed=user_card.is_completed,
+                expanded_example=user_card.expanded_example,
+                notes=user_card.notes,
+                difficulty_rating=user_card.difficulty_rating,
+                depth_preference=user_card.depth_preference
+            )
+        except HTTPException:
+            # If card not found (404), try saving it first
+            # Save the card to the user
+            save_card_for_user(
+                db=db, 
+                user_id=current_user.id, 
+                card_id=card_id,
+                expanded_example=user_card.expanded_example,
+                difficulty_rating=user_card.difficulty_rating,
+                depth_preference=user_card.depth_preference,
+                recommended_by=None  # Fix: Use None instead of user_card.recommended_by which doesn't exist
+            )
+            
+            # Now try updating again
+            result = update_user_card(
+                db=db,
+                user_id=current_user.id,
+                card_id=card_id,
+                is_completed=user_card.is_completed,
+                expanded_example=user_card.expanded_example,
+                notes=user_card.notes,
+                difficulty_rating=user_card.difficulty_rating,
+                depth_preference=user_card.depth_preference
+            )
+        
+        # If the completion status has changed, update progress across the hierarchy
+        if user_card.is_completed is not None:
+            # Update progress for sections, courses, and learning paths
+            progress_updates = cascade_progress_update(
+                db=db, 
+                user_id=current_user.id, 
+                card_id=card_id
+            )
+            
+            # Log the progress updates
+            if progress_updates["sections_updated"]:
+                logging.info(f"Updated progress for {len(progress_updates['sections_updated'])} sections")
+            if progress_updates["courses_updated"]:
+                logging.info(f"Updated progress for {len(progress_updates['courses_updated'])} courses")
+            if progress_updates["learning_paths_updated"]:
+                logging.info(f"Updated progress for {len(progress_updates['learning_paths_updated'])} learning paths")
+        
+        # If the user has marked the card as completed, check for achievements
+        if user_card.is_completed:
+            check_completion_achievements(db, user_id=current_user.id)
+        
+        return result
+    except Exception as e:
+        logging.error(f"Error updating card: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update card: {str(e)}"
+        )
 
 @router.delete("/users/me/cards/{card_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_saved_card(
