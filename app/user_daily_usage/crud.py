@@ -101,16 +101,20 @@ def increment_usage(
     
     usage = get_or_create_daily_usage(db, user_id, usage_date=usage_date)
     
+    # Check if user has premium subscription (skip limit check for premium users)
+    user = db.query(User).filter(User.id == user_id).first()
+    is_premium = user and user.subscription_type == 'premium'
+    
     if resource_type == 'paths':
-        # Check if limit would be exceeded
-        if usage.paths_generated + count > usage.paths_daily_limit:
+        # Check if limit would be exceeded (only for non-premium users)
+        if not is_premium and usage.paths_generated + count > usage.paths_daily_limit:
             return usage, True
             
         # Update the count
         usage.paths_generated += count
     elif resource_type == 'cards':
-        # Check if limit would be exceeded
-        if usage.cards_generated + count > usage.cards_daily_limit:
+        # Check if limit would be exceeded (only for non-premium users)
+        if not is_premium and usage.cards_generated + count > usage.cards_daily_limit:
             return usage, True
             
         # Update the count

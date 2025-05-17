@@ -220,14 +220,19 @@ def save_card_for_user(
             "recommended_by": assoc_data.recommended_by
         }
     
-    # Check if user has reached their subscription limit for cards
-    has_reached_limit, remaining = check_subscription_limits(db, user_id, 'cards')
-    if has_reached_limit:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"You have reached your subscription limit for saved cards. "
-                   f"Please upgrade your subscription to save more cards."
-        )
+    # Check if user has a premium subscription - premium users have unlimited cards
+    if user.subscription_type != 'premium':
+        # Only check limits for non-premium users
+        has_reached_limit, remaining = check_subscription_limits(db, user_id, 'cards')
+        if has_reached_limit:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You have reached your subscription limit for saved cards. "
+                       f"Please upgrade your subscription to save more cards."
+            )
+    else:
+        # Log that we're bypassing the limit check for premium users
+        logging.info(f"Bypassing card limit check for premium user {user_id}")
     
     # Save card for user
     # Use datetime.now() instead of func.now() for raw SQL parameters

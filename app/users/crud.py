@@ -94,8 +94,10 @@ def check_subscription_limits(db: Session, user_id: int, resource_type: str) -> 
     """
     Check if the user has reached their subscription limits for learning paths or cards.
     
-    This function now only checks daily usage limits as per updated requirements.
-    Account-wide limits have been removed.
+    For premium users, this function will immediately return (False, -1) indicating no limit
+    and unlimited remaining resources.
+    
+    For other users, this function checks daily usage limits.
     
     Args:
         db: Database session
@@ -118,6 +120,11 @@ def check_subscription_limits(db: Session, user_id: int, resource_type: str) -> 
     
     # Log the user's subscription for debugging
     logging.debug(f"Checking {resource_type} limits for user {user_id} with {subscription} subscription")
+    
+    # Premium users have unlimited resources
+    if subscription == 'premium':
+        logging.debug(f"User {user_id} has premium subscription, no limits applied")
+        return False, -1  # -1 indicates unlimited resources
     
     # Get or create daily usage record for today
     today = date.today()
