@@ -284,6 +284,7 @@ class LearningPathPlannerService:
                                  db=db, 
                                  user_id=user_id, 
                                  card_id=card_db.id,
+                                 is_completed=False,
                                  recommended_by="Learning Path Generator"
                              )
                              logging.info(f"Associated card {card_db.id} with user {user_id} in user_cards table")

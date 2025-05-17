@@ -276,9 +276,12 @@ def format_user_section_for_response(db: Session, user_section: UserSection) -> 
     
     user_card_completion_map = {}
     if card_ids_in_section: # Only query if there are cards
-        user_card_statuses = db.query(user_cards.c.card_id, user_cards.c.is_completed).filter(
-            user_cards.c.user_id == user_section.user_id, # Use user_id from the user_section
-            user_cards.c.card_id.in_(card_ids_in_section)
+        user_card_statuses = db.query(
+            user_section_cards.c.card_id,
+            user_section_cards.c.is_completed
+        ).filter(
+            user_section_cards.c.user_section_id == user_section.id,
+            user_section_cards.c.card_id.in_(card_ids_in_section)
         ).all()
         user_card_completion_map = {card_id: is_completed for card_id, is_completed in user_card_statuses}
 

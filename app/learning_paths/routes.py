@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 import inspect
 from sqlalchemy.sql import text
 from sqlalchemy import func
+from app.progress.utils import initialize_user_progress_records
 
 from app.db import get_db
 from app.auth.jwt import get_current_active_user
@@ -127,6 +128,7 @@ def ensure_serializable(data, visited=None, field_name=None):
             return None
 
 
+# Utility function to update is_completed and recalculate progress
 @router.put("/users/me/learning-paths/{learning_path_id}/sections/{section_id}/cards/{card_id}", response_model=ProgressUpdateResponse)
 def update_card_completion_in_learning_path_refactored(
     learning_path_id: int,
@@ -136,281 +138,134 @@ def update_card_completion_in_learning_path_refactored(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """
-    Update completion status for a card within a specific learning path and section context.
-    This will trigger cascading progress updates for the section, course, and learning path.
-    Refactored to match docs/progress_update.md.
-    """
     is_completed = body.is_completed
 
     try:
-        # 1. Validate UserLearningPath enrollment
-        user_learning_path = db.query(UserLearningPath).filter(
-            UserLearningPath.user_id == current_user.id,
-            UserLearningPath.learning_path_id == learning_path_id
-        ).options(selectinload(UserLearningPath.learning_path).selectinload(LearningPath.courses).selectinload(Course.sections), # Eager load for validation
-                  selectinload(UserLearningPath.learning_path).selectinload(LearningPath.sections)
-        ).first()
-        if not user_learning_path:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"User not enrolled in learning path {learning_path_id} or path does not exist."
-            )
-
-        # 2. Find the UserSection.
-        # section_id from the URL path is treated as the target_template_section_id
-        target_template_section_id = section_id
-
-        # Fetch the definitive template section first
-        template_section = db.query(CourseSection).filter(CourseSection.id == target_template_section_id).first()
-        if not template_section:
-            logging.error(f"Raising 404: Template section (CourseSection) with ID {target_template_section_id} not found in database.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Template section with ID {target_template_section_id} not found."
-            )
-
-        # Now, find the UserSection that corresponds to this specific template_section for the current user
+        # 1. Find UserSection by template section id
         user_section = db.query(UserSection).filter(
             UserSection.user_id == current_user.id,
-            UserSection.section_template_id == target_template_section_id
+            UserSection.section_template_id == section_id
         ).first()
-        
+
         if not user_section:
-            logging.info(f"UserSection not found for user {current_user.id} and template section {target_template_section_id}. Attempting to create.")
-            
-            # template_section is already fetched and validated above. Now validate its belonging to the path.
-            actual_template_lp_id = user_learning_path.learning_path_id
-            section_belongs_to_path = False
+            logging.info(f"[MARK] ❌ UserSection not found for user {current_user.id}, template section {section_id}")
+            raise HTTPException(status_code=404, detail="User section not found")
 
-            # Check if section is directly under the learning path
-            if template_section.learning_path_id == actual_template_lp_id:
-                section_belongs_to_path = True
-            # Check if section belongs to a course within the learning path
-            elif hasattr(template_section, 'course_id') and template_section.course_id:
-                course_in_path_assoc = db.query(learning_path_courses).filter(
-                    learning_path_courses.c.learning_path_id == actual_template_lp_id,
-                    learning_path_courses.c.course_id == template_section.course_id
-                ).first()
-                if course_in_path_assoc:
-                    section_belongs_to_path = True
-            
-            if not section_belongs_to_path:
-                # Fallback check using course_section_association if direct links aren't definitive
-                path_course_ids_query = db.query(learning_path_courses.c.course_id).filter(
-                    learning_path_courses.c.learning_path_id == actual_template_lp_id
-                )
-                path_course_ids = [id_tuple[0] for id_tuple in path_course_ids_query.all()]
-
-                if path_course_ids:
-                    section_course_assoc = db.query(course_section_association.c.section_id).filter(
-                        course_section_association.c.section_id == template_section.id,
-                        course_section_association.c.course_id.in_(path_course_ids)
-                    ).first()
-                    if section_course_assoc:
-                        section_belongs_to_path = True
-            
-            if not section_belongs_to_path:
-                logging.error(f"Validation failed: Template section {template_section.id} (title: '{template_section.title}') "
-                              f"is not part of learning path {actual_template_lp_id}. "
-                              f"TS.learning_path_id: {template_section.learning_path_id}, TS.course_id: {template_section.course_id if hasattr(template_section, 'course_id') else 'N/A'}.") # Safe access for logging
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Section {target_template_section_id} is not part of learning path {actual_template_lp_id}."
-                )
-
-            try:
-                # Determine associated UserCourse.id if UserSection model links to it
-                associated_user_course_id = None
-                if hasattr(template_section, 'course_id') and template_section.course_id:
-                    user_course_obj = db.query(UserCourse.id).filter(
-                        UserCourse.user_id == current_user.id,
-                        UserCourse.course_id == template_section.course_id
-                    ).scalar_one_or_none()
-                    if user_course_obj:
-                        associated_user_course_id = user_course_obj
-                    else:
-                        logging.warning(f"UserCourse not found for template course {template_section.course_id} "
-                                        f"while creating UserSection for template section {template_section.id}. "
-                                        f"UserSection.user_course_id may be null if model supports it.")
-
-                user_section_data = {
-                    "user_id": current_user.id,
-                    "section_template_id": template_section.id, # This is target_template_section_id
-                    "title": template_section.title,
-                    "description": template_section.description,
-                    "progress": 0.0
-                }
-                # Add user_course_id only if it exists to avoid issues with models not having the field
-                # or if the field is non-nullable and we couldn't find/create UserCourse.
-                # This assumes UserSection model can handle a missing user_course_id or it's added if present.
-                # A more robust solution would inspect the UserSection model or use a dedicated CRUD.
-                if associated_user_course_id and hasattr(UserSection, 'user_course_id'):
-                     user_section_data['user_course_id'] = associated_user_course_id
-
-                user_section = UserSection(**user_section_data)
-                db.add(user_section)
-                db.flush()
-                db.refresh(user_section)
-                logging.info(f"Successfully created UserSection {user_section.id} for user {current_user.id} and template section {target_template_section_id}.")
-
-                # Populate the new UserSection with all cards from its template
-                template_card_associations = db.query(section_cards).filter(
-                    section_cards.c.section_id == template_section.id
-                ).all()
-
-                if template_card_associations:
-                    for assoc in template_card_associations:
-                        db.execute(
-                            user_section_cards.insert().values(
-                                user_section_id=user_section.id,
-                                card_id=assoc.card_id,
-                                order_index=assoc.order_index,
-                                is_custom=False # Cards copied from template are not custom
-                            )
-                        )
-                    db.flush() # Ensure card associations are written
-                    logging.info(f"Populated UserSection {user_section.id} with {len(template_card_associations)} cards from template section {template_section.id}.")
-
-            except SQLAlchemyError as e_sql:
-                db.rollback()
-                logging.error(f"SQLAlchemyError creating UserSection: {e_sql}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Could not create user section record.")
-            except Exception as e_create: # Catch other potential errors during instantiation
-                db.rollback()
-                logging.error(f"Error creating UserSection instance: {e_create}", exc_info=True)
-                raise HTTPException(status_code=500, detail="Failed to initialize user section data.")
-
-        if not user_section: # Should not happen if creation logic is sound and no other error raised
-            # This is an unlikely path to a 404 if creation logic raises 500s on failure.
-            logging.error(f"Raising 404: UserSection for template_id {target_template_section_id} for user {current_user.id} is None after creation attempt. This indicates an unexpected issue in UserSection creation flow.")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"User section for template {target_template_section_id} could not be found or created for user {current_user.id}"
-            )
-        
-        # 3. Check if card exists in the user_section.
-        # At this point, user_section is the correct UserSection for the target_template_section_id.
-        # template_section is the correct CourseSection (template).
-        
-        card_link_in_user_section = db.query(user_section_cards).filter(
-            user_section_cards.c.user_section_id == user_section.id, # Check against the specific user_section's ID
+        # 2. Check if card is in the user_section
+        card_entry = db.query(user_section_cards).filter(
+            user_section_cards.c.user_section_id == user_section.id,
             user_section_cards.c.card_id == card_id
         ).first()
 
-        if not card_link_in_user_section:
-            # If card is not linked to the user_section, check if it exists in the actual template_section
-            # template_section is already the correct one (CourseSection.id == target_template_section_id)
-            logging.info(f"DEBUG_QUERY: Card not in user_section_cards. Checking section_cards with template_section.id = {template_section.id} and card_id = {card_id}")
-            card_in_template = db.query(section_cards).filter(
-                section_cards.c.section_id == template_section.id, # Use the definitive template_section
-                section_cards.c.card_id == card_id
-            ).first()
-            if card_in_template:
-                db.execute(
-                    user_section_cards.insert().values(
-                        user_section_id=user_section.id, # Link to the found/created user_section
-                        card_id=card_id,
-                        order_index=card_in_template.order_index,
-                        is_custom=False
-                    )
-                )
-                db.flush()
-                logging.info(f"Card {card_id} added to user_section {user_section.id} (for template {template_section.id}) from template.")
-            else:
-                # Card doesn't even exist in the definitive template section
-                logging.error(f"Raising 404: Card ID {card_id} not found in section_cards (template cards) for template_section ID {template_section.id}. UserSection ID for this template: {user_section.id}")
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Card {card_id} not found in template section {template_section.id}")
+        if not card_entry:
+            raise HTTPException(status_code=404, detail="Card not found in section")
+
+        # 3. Update is_completed for that specific user_section_card
+        db.execute(
         
-        # 4. Find or create a user_card entry & update completion status
-        try:
-            user_card_details_dict = crud_get_user_card_by_id(db, user_id=current_user.id, card_id=card_id)
-        except HTTPException as e_inner_get_card:
-            if e_inner_get_card.status_code == 404:
-                _ = crud_save_card_for_user(db, user_id=current_user.id, card_id=card_id)
-                user_card_details_dict = crud_get_user_card_by_id(db, user_id=current_user.id, card_id=card_id)
-            else:
-                raise e_inner_get_card
-        
-        if user_card_details_dict.get("is_completed") != is_completed:
-            crud_update_user_card(
-                db=db,
-                user_id=current_user.id,
-                card_id=card_id,
-                is_completed=is_completed
+            user_section_cards.update()
+            .where(
+                user_section_cards.c.user_section_id == user_section.id,
+                user_section_cards.c.card_id == card_id
             )
-            db.refresh(user_section)
-            if user_learning_path: db.refresh(user_learning_path)
-            
-            progress_updates_log = cascade_progress_update(
-                db=db,
-                user_id=current_user.id,
-                card_id=card_id
-            )
-            
-            if progress_updates_log.get("sections_updated"):
-                logging.info(f"Cascade updated progress for {len(progress_updates_log['sections_updated'])} sections")
+            .values(is_completed=is_completed)
+        )
+        db.commit()
 
-            if is_completed:
-                check_completion_achievements(db, user_id=current_user.id)
-        
-        # 6. Fetch the latest data for the response
-        db.refresh(user_section)
-        if user_learning_path:
-            db.refresh(user_learning_path)
-        else: 
-            user_learning_path = db.query(UserLearningPath).filter(
-                UserLearningPath.user_id == current_user.id,
-                UserLearningPath.learning_path_id == learning_path_id
-            ).first()
-            if not user_learning_path:
-                raise HTTPException(status_code=500, detail="User Learning Path became unavailable unexpectedly.")
+        # 4. Recalculate section progress
+        total_cards = db.query(user_section_cards).filter(
+            user_section_cards.c.user_section_id == user_section.id
+        ).count()
 
-        final_user_card_details = crud_get_user_card_by_id(db, user_id=current_user.id, card_id=card_id)
+        completed_cards = db.query(user_section_cards).filter(
+            user_section_cards.c.user_section_id == user_section.id,
+            user_section_cards.c.is_completed == True
+        ).count()
 
+        section_progress = round((completed_cards / total_cards) * 100, 2) if total_cards > 0 else 0.0
+        user_section.progress = section_progress
+        db.commit()
+
+        # 5. Get and update course progress
         course_progress = 0.0
-        try:
-            if user_section.section_template_id:
-                template_section = db.query(CourseSection).filter(CourseSection.id == user_section.section_template_id).first()
-                if template_section:
-                    course_template_id = None
-                    if hasattr(template_section, 'course_id') and template_section.course_id:
-                        course_template_id = template_section.course_id
-                    else: 
-                        assoc = db.query(course_section_association.c.course_id).filter(
-                            course_section_association.c.section_id == template_section.id
-                        ).first()
-                        if assoc:
-                            course_template_id = assoc[0]
-                    
-                    if course_template_id and user_learning_path:
-                        user_course_progress_obj = db.query(UserCourse).filter(
-                            UserCourse.user_id == current_user.id,
-                            UserCourse.course_id == course_template_id
-                        ).first()
-                        if user_course_progress_obj:
-                            course_progress = user_course_progress_obj.progress
-                        else:
-                            logging.warning(f"Could not find UserCourse progress for course {course_template_id} in LP {learning_path_id} for user {current_user.id}")
-        except Exception as e_course_prog:
-            logging.error(f"Error fetching course progress: {e_course_prog}", exc_info=True)
-        
-        logging.info(f"Preparing ProgressUpdateResponse (Refactored Endpoint) with:")
-        logging.info(f"  updated_card.id: {final_user_card_details.get('id')}, type: {type(final_user_card_details.get('id'))}")
-        logging.info(f"  updated_card.is_completed: {final_user_card_details.get('is_completed')}, type: {type(final_user_card_details.get('is_completed'))}")
-        logging.info(f"  updated_section_progress: {user_section.progress}, type: {type(user_section.progress)}")
-        logging.info(f"  updated_course_progress: {course_progress}, type: {type(course_progress)}")
-        logging.info(f"  updated_learning_path_progress: {user_learning_path.progress if user_learning_path else 0.0}, type: {type(user_learning_path.progress) if user_learning_path and hasattr(user_learning_path, 'progress') and user_learning_path.progress is not None else type(0.0)}")
+        course_id = None
+        if user_section.section_template_id:
+            course_id_result = db.query(course_section_association.c.course_id).filter(
+                course_section_association.c.section_id == user_section.section_template_id
+            ).first()
+            if course_id_result:
+                course_id = course_id_result[0]
 
+        if course_id:
+            user_course = db.query(UserCourse).filter(
+                UserCourse.user_id == current_user.id,
+                UserCourse.course_id == course_id
+            ).first()
+
+            if user_course:
+                # Get all sections under this course
+                section_ids_in_course = db.query(course_section_association.c.section_id).filter(
+                    course_section_association.c.course_id == course_id
+                ).all()
+                section_ids = [sid[0] for sid in section_ids_in_course]
+
+                # Get all user sections for these section ids
+                user_sections = db.query(UserSection).filter(
+                    UserSection.user_id == current_user.id,
+                    UserSection.section_template_id.in_(section_ids)
+                ).all()
+
+                total_progress = sum([s.progress for s in user_sections])
+                course_progress = round(total_progress / len(user_sections), 2) if user_sections else 0.0
+
+                user_course.progress = course_progress
+                db.commit()
+
+        # 6. Get and update learning path progress
+        user_learning_path = db.query(UserLearningPath).filter(
+            UserLearningPath.user_id == current_user.id,
+            UserLearningPath.learning_path_id == learning_path_id
+        ).first()
+
+        lp_progress = 0.0
+        if user_learning_path:
+            # Get all courses in this LP
+            lp_course_ids = db.query(learning_path_courses.c.course_id).filter(
+                learning_path_courses.c.learning_path_id == learning_path_id
+            ).all()
+            course_ids = [cid[0] for cid in lp_course_ids]
+
+            user_courses = db.query(UserCourse).filter(
+                UserCourse.user_id == current_user.id,
+                UserCourse.course_id.in_(course_ids)
+            ).all()
+
+            total_cp = sum([uc.progress for uc in user_courses])
+            lp_progress = round(total_cp / len(user_courses), 2) if user_courses else 0.0
+
+            user_learning_path.progress = lp_progress
+            db.commit()
+
+            # 7. Return response 前，插入 logging
+            logging.info(
+                f"[MARK] ✅ Update summary - user: {current_user.id}, LP: {learning_path_id}, "
+                f"course: {course_id}, section: {user_section.id}, card: {card_id}, "
+                f"is_completed: {is_completed}, section_progress: {section_progress}, "
+                f"course_progress: {course_progress}, lp_progress: {lp_progress}"
+            )
+
+
+        # 7. Return response
         return ProgressUpdateResponse(
             updated_card=UpdatedCardInfo(
                 id=card_id,
-                is_completed=final_user_card_details.get("is_completed", False)
+                is_completed=is_completed
             ),
-            updated_section_progress=user_section.progress,
+            updated_section_progress=section_progress,
             updated_course_progress=course_progress,
-            updated_learning_path_progress=user_learning_path.progress if user_learning_path else 0.0
+            updated_learning_path_progress=lp_progress
         )
+
 
     except HTTPException as e:
         raise e
@@ -563,6 +418,7 @@ def read_user_learning_path(
     For consistency with the frontend implementation, use section_template_id (referred to as "id"
     or "section_id" in many contexts) for API calls.
     """
+
     # Generate cache key based on user ID, path ID and last updated timestamp
     try:
         # Check if path exists and get last update timestamp
@@ -576,6 +432,11 @@ def read_user_learning_path(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Learning path not found for this user"
             )
+        initialize_user_progress_records(
+            user_id=current_user.id,
+            learning_path_id=path_id,
+            db=db
+        )
         
         # Calculate cache key based on update timestamps
         cache_key = f"user_path:{current_user.id}:{path_id}:{user_path.updated_at}"
@@ -897,6 +758,7 @@ def read_user_learning_path_full(
                 detail="Learning path not found for this user"
             )
         
+        
         # Get the learning path with courses
         learning_path = db.query(LearningPath).options(
             selectinload(LearningPath.sections),
@@ -1177,50 +1039,17 @@ def add_learning_path_to_user(
         learning_path_id=user_path.learning_path_id
     )
     
-    # Collect all card IDs from the learning path
-    all_card_ids = []
-    for course in learning_path.courses:
-        for section in course.sections:
-            for card in section.cards:
-                all_card_ids.append(card.id)
-    
-    if all_card_ids:
-        try:
-            # Find which cards already have user_cards entries
-            existing_entries = db.query(user_cards.c.card_id).filter(
-                user_cards.c.user_id == current_user.id,
-                user_cards.c.card_id.in_(all_card_ids)
-            ).all()
-            existing_card_ids = set(card_id for (card_id,) in existing_entries)
-            
-            # Create entries for cards that don't have one yet
-            missing_card_ids = [c_id for c_id in all_card_ids if c_id not in existing_card_ids]
-            
-            # Insert missing entries in bulk if there are any
-            if missing_card_ids:
-                # Use raw SQL for better performance with many inserts
-                for card_id in missing_card_ids:
-                    db.execute(
-                        text("""
-                        INSERT INTO user_cards (
-                            user_id, card_id, is_completed, saved_at
-                        )
-                        VALUES (
-                            :user_id, :card_id, :is_completed, NOW()
-                        )
-                        """),
-                        {
-                            "user_id": current_user.id, 
-                            "card_id": card_id,
-                            "is_completed": False  # Initialize as not completed
-                        }
-                    )
-                db.commit()
-                logging.info(f"Created {len(missing_card_ids)} user_card entries for user {current_user.id}")
-        except Exception as e:
-            logging.error(f"Error creating user_card entries: {e}")
-            # Don't raise an exception here, as the learning path was already assigned
-            # This is just to ensure complete data
+    # ✅ NEW: Initialize all user_* progress records in one shot
+    try:
+        initialize_user_progress_records(
+            user_id=current_user.id,
+            learning_path_id=user_path.learning_path_id,
+            db=db
+        )
+        logging.info(f"[Init] Initialized progress records for LP {user_path.learning_path_id}, user {current_user.id}")
+    except Exception as e:
+        logging.error(f"[Init] Failed to initialize progress records: {e}")
+        # 不 raise 异常，保持 assign 成功即可
     
     return user_learning_path
 
@@ -1302,6 +1131,17 @@ async def generate_ai_learning_path(
             learning_path_id=learning_path.id
         )
         
+        # ✅ 初始化 user 所有进度记录（课程、章节、卡片、连接器）
+        try:
+            initialize_user_progress_records(
+                user_id=current_user.id,
+                learning_path_id=learning_path.id,
+                db=db
+            )
+            logging.info(f"[Init] Initialized all user progress records for LP {learning_path.id}, user {current_user.id}")
+        except Exception as e:
+            logging.error(f"[Init] Failed to initialize user progress records: {e}")
+                
         # Increment user's daily usage for learning paths
         increment_user_resource_usage(db, current_user.id, "paths")
         
@@ -1674,4 +1514,17 @@ def debug_section(
             detail=f"Error debugging section: {str(e)}"
         )
 
+def section_belongs_to_courses(db, section_id: int, course_ids: List[int]) -> bool:
+    # 直接查询 association 表，看是否有对应关系
+    assoc = db.query(course_section_association).filter(
+        course_section_association.c.section_id == section_id,
+        course_section_association.c.course_id.in_(course_ids)
+    ).first()
+    return assoc is not None
+
+def get_course_id_for_section(db, section_id: int) -> Optional[int]:
+    assoc = db.query(course_section_association.c.course_id).filter(
+        course_section_association.c.section_id == section_id
+    ).first()
+    return assoc[0] if assoc else None
 

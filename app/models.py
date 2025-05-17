@@ -111,7 +111,8 @@ user_section_cards = Table(
     Column('user_section_id', Integer, ForeignKey('user_sections.id'), primary_key=True),
     Column('card_id', Integer, ForeignKey('cards.id'), primary_key=True),
     Column('order_index', Integer, nullable=False),
-    Column('is_custom', Boolean, default=False)  # 用户自己加的
+    Column('is_custom', Boolean, default=False),  # 用户自己加的
+    Column("is_completed", Boolean, default=False)
 )
 
 # --- Define Main Models AFTER Association Tables ---

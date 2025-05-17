@@ -594,3 +594,134 @@ def cascade_progress_update(db: Session, user_id: int, card_id: int, update_all:
                 results["learning_paths_updated"].extend(rounded_progresses)
                 
     return results 
+
+##初始化所有课程到db
+def initialize_user_progress_records(user_id: int, learning_path_id: int, db: Session):
+    """
+    Ensure that all user_* tables are populated for the learning path:
+    - user_courses
+    - user_sections
+    - user_section_cards
+    - user_cards
+    """
+    from app.models import Course, CourseSection, Card
+    from app.models import user_section_cards, user_cards, UserCourse, UserSection
+    from app.models import course_section_association, section_cards, learning_path_courses
+    from datetime import datetime
+    
+    from app.models import learning_path_courses, Course
+
+    course_ids = db.query(learning_path_courses.c.course_id).filter(
+        learning_path_courses.c.learning_path_id == learning_path_id
+    ).all()
+    course_ids = [c[0] for c in course_ids]
+
+    courses = db.query(Course).filter(Course.id.in_(course_ids)).all()
+
+    for course in courses:
+        exists = db.query(learning_path_courses).filter(
+            learning_path_courses.c.learning_path_id == learning_path_id,
+            learning_path_courses.c.course_id == course.id
+        ).first()
+        if not exists:
+            db.execute(learning_path_courses.insert().values(
+                learning_path_id=learning_path_id,
+                course_id=course.id
+            ))
+    db.flush()
+
+    # 1. 所有 course
+    course_ids = db.query(learning_path_courses.c.course_id).filter(
+        learning_path_courses.c.learning_path_id == learning_path_id
+    ).all()
+    course_ids = [c[0] for c in course_ids]
+
+    for course_id in course_ids:
+        # user_course 初始化
+        exists = db.query(UserCourse).filter_by(user_id=user_id, course_id=course_id).first()
+        if not exists:
+            db.add(UserCourse(user_id=user_id, course_id=course_id, progress=0.0))
+
+    # 2. 所有 section（包括直接属于 learning_path 的和 course 中的）
+    section_ids = set()
+
+    # a. 直接属于 learning path 的
+    direct_section_ids = db.query(CourseSection.id).filter(
+        CourseSection.learning_path_id == learning_path_id
+    ).all()
+    section_ids.update(s[0] for s in direct_section_ids)
+
+    # b. 通过 course → section 的
+    course_section_ids = db.query(course_section_association.c.section_id).filter(
+        course_section_association.c.course_id.in_(course_ids)
+    ).all()
+    section_ids.update(s[0] for s in course_section_ids)
+
+    for section_id in section_ids:
+        # user_section 初始化
+        exists = db.query(UserSection).filter_by(user_id=user_id, section_template_id=section_id).first()
+        if not exists:
+            section_obj = db.query(CourseSection).filter(CourseSection.id == section_id).first()
+            db.add(UserSection(
+                user_id=user_id,
+                section_template_id=section_id,
+                title=section_obj.title,
+                description=section_obj.description,
+                progress=0.0
+            ))
+
+    db.flush()
+
+    # 3. 所有 card
+    card_ids = set()
+    for section_id in section_ids:
+        assoc_cards = db.query(section_cards).filter(section_cards.c.section_id == section_id).all()
+        for assoc in assoc_cards:
+            card_ids.add(assoc.card_id)
+
+    # user_cards 初始化
+    existing_cards = db.query(user_cards.c.card_id).filter(
+        user_cards.c.user_id == user_id,
+        user_cards.c.card_id.in_(card_ids)
+    ).all()
+    existing_card_ids = set(c[0] for c in existing_cards)
+    new_card_ids = card_ids - existing_card_ids
+
+    for card_id in new_card_ids:
+        db.execute(
+            text("""
+            INSERT INTO user_cards (user_id, card_id, is_completed, saved_at)
+            VALUES (:user_id, :card_id, false, NOW())
+            """),
+            {"user_id": user_id, "card_id": card_id}
+        )
+
+    # user_section_cards 初始化（每个 user_section 都插入）
+    user_sections = db.query(UserSection).filter(
+        UserSection.user_id == user_id,
+        UserSection.section_template_id.in_(section_ids)
+    ).all()
+
+    for user_section in user_sections:
+        template_id = user_section.section_template_id
+        assoc_cards = db.query(section_cards).filter(section_cards.c.section_id == template_id).all()
+
+        for assoc in assoc_cards:
+            exists = db.query(user_section_cards).filter_by(
+                user_section_id=user_section.id,
+                card_id=assoc.card_id
+            ).first()
+            if not exists:
+                db.execute(user_section_cards.insert().values(
+                    user_section_id=user_section.id,
+                    card_id=assoc.card_id,
+                    order_index=assoc.order_index,
+                    is_custom=False
+                ))
+
+    db.commit()
+    logging.info(
+        f"[Init] Linked {len(courses)} courses, "
+        f"{len(section_ids)} sections, "
+        f"{len(card_ids)} cards for LP {learning_path_id}, user {user_id}"
+    )

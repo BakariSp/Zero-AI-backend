@@ -135,6 +135,7 @@ async def get_current_active_user(current_user = Depends(get_current_user), requ
     if current_user is None:
         # Log that the user wasn't authenticated and return 401
         logging.warning("Authentication failed: current_user is None")
+        logging.info(f"[Auth] Resolved current user: {current_user}")
         if request and request.method == "OPTIONS":
             logging.info("Not raising exception for OPTIONS request")
             return None

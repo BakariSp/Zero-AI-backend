@@ -51,7 +51,8 @@ def upgrade() -> None:
         sa.Column('card_id', sa.Integer(), nullable=False),
         sa.Column('order_index', sa.Integer(), nullable=False),
         sa.Column('is_custom', sa.Boolean(), nullable=True),
-        sa.ForeignKeyConstraint(['card_id'], ['cards.id'], ),
+        sa.Column('is_completed', sa.Boolean(), nullable=False, server_default='0'),  # ✅ 关键行
+        sa.ForeignKeyConstraint(['card_id'], ['cards.id']),
         sa.ForeignKeyConstraint(['user_section_id'], ['user_sections.id'], ),
         sa.PrimaryKeyConstraint('user_section_id', 'card_id')
     )

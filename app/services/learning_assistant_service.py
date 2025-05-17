@@ -11,6 +11,9 @@ from app.cards.schemas import CardCreate as CardCreateSchema
 from app.cards.crud import create_card, get_card
 from app.sections.crud import get_section
 from app.user_daily_usage.crud import increment_usage
+from sqlalchemy import func
+from sqlalchemy.sql import text
+from app.models import UserSection, user_section_cards
 
 class LearningAssistantService:
     """
@@ -185,14 +188,49 @@ class LearningAssistantService:
             
             # If a user is specified, increment their daily usage count for cards
             if user_id:
+                user_section = db.query(UserSection).filter(
+                    UserSection.user_id == user_id,
+                    UserSection.section_template_id == section_id
+                ).first()
+
+                if not user_section:
+                    raise HTTPException(status_code=404, detail="UserSection not found for this user and section")
+
+                # ✅ 获取当前最大 order_index
+                max_order_index = db.query(func.max(user_section_cards.c.order_index)).filter(
+                    user_section_cards.c.user_section_id == user_section.id
+                ).scalar() or 0
+
+                # ✅ 插入 user_section_cards
+                db.execute(
+                    user_section_cards.insert().values(
+                        user_section_id=user_section.id,
+                        card_id=created_card.id,
+                        order_index=max_order_index + 1,
+                        is_custom=True
+                    )
+                )
+                db.commit()
+
+                # ✅ 插入 user_cards 记录（未完成状态）
+                db.execute(
+                    text("""
+                    INSERT INTO user_cards (user_id, card_id, is_completed, saved_at)
+                    VALUES (:user_id, :card_id, false, NOW())
+                    """),
+                    {"user_id": user_id, "card_id": created_card.id}
+                )
+
+            # ✅ 使用统计逻辑
+            if user_id:
                 try:
-                    # Increment the user's daily usage for cards
                     increment_usage(db, user_id, "cards")
                     logging.info(f"Incremented daily card usage for user {user_id}")
                 except Exception as e:
                     logging.error(f"Error incrementing card usage for user {user_id}: {str(e)}")
-                    # We don't want to fail the operation if the usage tracking fails
-            
+
+            db.commit()
+
             # Return the created card with additional information
             return {
                 "card": {
