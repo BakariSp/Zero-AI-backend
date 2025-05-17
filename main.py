@@ -30,6 +30,7 @@ from app.user_tasks.routes import router as user_tasks_router
 from app.user_daily_usage.routes import router as user_daily_usage_router
 from app.planner.ai import router as planner_router
 # from app.learning_assistant.routes import router as learning_assistant_router  # Module doesn't exist
+from app.routers.learning_assistant import router as learning_assistant_router
 from app.routes import router as app_routes
 from app.scheduler import start_scheduler
 import logging
@@ -207,6 +208,7 @@ app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
 app.include_router(user_daily_usage_router, prefix="/api", tags=["user_daily_usage"])
 app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
 # app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])  # Module doesn't exist
+app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])
 app.include_router(app_routes, prefix="/api", tags=["app"])
 # Initialize database on startup
 @app.on_event("startup")

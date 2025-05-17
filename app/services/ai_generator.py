@@ -506,6 +506,33 @@ class CardGeneratorAgent(BaseAgent):
                 # Parse the response
                 card_data = self._extract_json_from_response(content)
                 
+                # Check if we got an error object instead of a valid card
+                if isinstance(card_data, dict) and "error" in card_data:
+                    logging.error(f"OpenAI returned an error: {card_data.get('error')}")
+                    # Create a fallback card instead
+                    return CardCreate(
+                        keyword=keyword,
+                        question=f"What is {keyword}?",
+                        answer=f"This is a concept related to {section_title if section_title else 'the topic'}.",
+                        explanation="Please try generating this card again for more detailed information.",
+                        difficulty=difficulty,
+                        resources=[]
+                    )
+                
+                # Validate the card has the required fields
+                required_fields = ["keyword", "question", "answer", "explanation"]
+                if not all(field in card_data for field in required_fields):
+                    logging.warning(f"Card missing required fields. Required: {required_fields}. Card: {card_data}")
+                    # Create a fallback card
+                    return CardCreate(
+                        keyword=card_data.get("keyword", keyword),
+                        question=card_data.get("question", f"What is {keyword}?"),
+                        answer=card_data.get("answer", f"This is a concept related to {section_title if section_title else 'the topic'}."),
+                        explanation=card_data.get("explanation", "Please try generating this card again for more detailed information."),
+                        difficulty=card_data.get("difficulty", difficulty),
+                        resources=card_data.get("resources", [])
+                    )
+                
                 # Validate URLs and get better resources if needed
                 if "resources" in card_data:
                     # Validate and enhance resources
@@ -538,7 +565,15 @@ class CardGeneratorAgent(BaseAgent):
             
         except Exception as e:
             logging.error(f"Error generating card for keyword '{keyword}': {e}", exc_info=True)
-            raise
+            # Create a fallback card instead of raising an exception
+            return CardCreate(
+                keyword=keyword,
+                question=f"What is {keyword}?",
+                answer=f"This is a concept related to {section_title if section_title else 'the topic'}.",
+                explanation="An error occurred while generating this card. Please try again.",
+                difficulty=difficulty,
+                resources=[]
+            )
 
     async def generate_multiple_cards_from_topic(
         self,
@@ -630,13 +665,34 @@ class CardGeneratorAgent(BaseAgent):
                 # --- Process and validate cards ---
                 card_list_data = None
                 if isinstance(extracted_json, dict) and "cards" in extracted_json and isinstance(extracted_json.get("cards"), list):
-                     card_list_data = extracted_json["cards"]
-                elif isinstance(extracted_json, dict) and "flashcards" in extracted_json and isinstance(extracted_json.get("flashcards"), list):
-                     card_list_data = extracted_json["flashcards"]
-                elif isinstance(extracted_json, list):
-                     card_list_data = extracted_json
+                    card_list_data = extracted_json["cards"]
+                elif isinstance(extracted_json, list): # Handle direct list response
+                    card_list_data = extracted_json
+                elif isinstance(extracted_json, dict) and "error" in extracted_json:
+                    # Handle case where OpenAI returns an error object
+                    logging.error(f"OpenAI returned an error: {extracted_json.get('error')}")
+                    # Return a minimal set of placeholder cards
+                    return [
+                        {
+                            "keyword": f"{topic} - aspect 1",
+                            "question": f"What is an important aspect of {topic}?",
+                            "answer": f"This is a concept related to {topic}.",
+                            "explanation": "An error occurred while generating cards. Please try again.",
+                            "difficulty": difficulty,
+                            "resources": []
+                        },
+                        {
+                            "keyword": f"{topic} - aspect 2",
+                            "question": f"What is another important aspect of {topic}?",
+                            "answer": f"This is another concept related to {topic}.",
+                            "explanation": "An error occurred while generating cards. Please try again.",
+                            "difficulty": difficulty,
+                            "resources": []
+                        }
+                    ]
                 else:
-                     raise ValueError("Fine-tuned model response was not in the expected list, {'cards': list}, or {'flashcards': list} format.")
+                    logging.error(f"Unexpected JSON structure for cards: {extracted_json}")
+                    raise ValueError("AI response for cards not in expected list or {{'cards': list}} format.")
 
                 if not card_list_data:
                     logging.warning(f"Fine-tuned model returned an empty list of cards for topic '{topic}'.")
@@ -1099,20 +1155,24 @@ class LearningAssistantAgent(BaseAgent):
         try:
             # Try to use CardGeneratorAgent if available
             if card_agent:
-                card_data = await card_agent.generate_card(
-                    keyword=keyword,
-                    context=context,
-                    section_title=section_title,
-                    course_title=course_title,
-                    difficulty=difficulty_level
-                )
-                if isinstance(card_data, dict):
-                    return card_data
-                else:
-                    # Convert from CardCreate object if needed
-                    return card_data.dict()
+                try:
+                    card_data = await card_agent.generate_card(
+                        keyword=keyword,
+                        context=context,
+                        section_title=section_title,
+                        course_title=course_title,
+                        difficulty=difficulty_level
+                    )
+                    if isinstance(card_data, dict):
+                        return card_data
+                    else:
+                        # Convert from CardCreate object if needed
+                        return card_data.dict()
+                except Exception as card_error:
+                    logging.error(f"Error from card agent: {card_error}")
+                    # Fall through to the fallback approach below
             
-            # Fallback to direct generation if card_agent not available
+            # Fallback to direct generation if card_agent not available or failed
             cache_params = {
                 "keyword": keyword,
                 "context": context,
