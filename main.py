@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth import get_user_from_request, get_current_active_user
 from app.users.routes import router as users_router
 from app.auth.jwt import router as auth_router
+from app.auth.guest import router as guest_router
 from app.cards.routes import router as cards_router
 from app.db import init_db
 from starlette.middleware.sessions import SessionMiddleware
@@ -28,8 +29,9 @@ from app.backend_tasks.routes import router as backend_tasks_router
 from app.user_tasks.routes import router as user_tasks_router
 from app.user_daily_usage.routes import router as user_daily_usage_router
 from app.planner.ai import router as planner_router
-from app.routers.learning_assistant import router as learning_assistant_router
+# from app.learning_assistant.routes import router as learning_assistant_router  # Module doesn't exist
 from app.routes import router as app_routes
+from app.scheduler import start_scheduler
 import logging
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -190,6 +192,7 @@ async def add_user_to_request(request: Request, call_next):
 # Include routers - make sure the prefix is correct
 app.include_router(users_router, prefix="/api", tags=["users"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
+app.include_router(guest_router, prefix="/api", tags=["guest"])
 app.include_router(cards_router, prefix="/api", tags=["cards"])
 app.include_router(learning_paths_router, prefix="/api", tags=["learning_paths"])
 app.include_router(daily_logs_router, prefix="/api", tags=["daily_logs"])
@@ -203,13 +206,21 @@ app.include_router(backend_tasks_router, prefix="/api", tags=["backend_tasks"])
 app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
 app.include_router(user_daily_usage_router, prefix="/api", tags=["user_daily_usage"])
 app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
-app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])
+# app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])  # Module doesn't exist
 app.include_router(app_routes, prefix="/api", tags=["app"])
 # Initialize database on startup
 @app.on_event("startup")
 def startup_db_client():
     init_db()
     log.info("Database initialized")
+    
+    # Start the scheduler to run background tasks
+    try:
+        start_scheduler()
+        log.info("Background task scheduler started")
+    except Exception as e:
+        log.error(f"Error starting scheduler: {str(e)}")
+    
     # Log the origins allowed for CORS
     log.info(f"CORS allowed origins: {origins}")
 

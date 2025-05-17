@@ -33,6 +33,11 @@ class User(Base):
     subscription_start_date = Column(DateTime, nullable=True)
     subscription_expiry_date = Column(DateTime, nullable=True)
     
+    # Guest user fields
+    is_guest = Column(Boolean, default=False)
+    merged_into_user_id = Column(Integer, nullable=True)
+    last_active_at = Column(DateTime, default=func.now())
+    
     # Add relationships if needed
     # items = relationship("Item", back_populates="owner") 
     

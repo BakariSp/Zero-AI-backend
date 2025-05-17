@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.users.crud import get_user_by_email
 from app.db import SessionLocal
+from app.models import User
 from passlib.context import CryptContext
 import logging
 
@@ -17,6 +18,8 @@ import logging
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-for-jwt-please-change-in-production")
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+# Guest tokens can be longer-lived
+GUEST_TOKEN_EXPIRE_DAYS = int(os.getenv("GUEST_TOKEN_EXPIRE_DAYS", "30"))
 
 # Create a custom OAuth2 scheme that will be skipped for OPTIONS requests
 class CustomOAuth2PasswordBearer(OAuth2PasswordBearer):
@@ -63,6 +66,7 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+    is_guest: Optional[bool] = False
 
 # Dependency to get the database session
 def get_db():
@@ -88,10 +92,18 @@ def authenticate_user(db, email: str, password: str):
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
+    
+    # Use longer expiration for guest users
+    if to_encode.get("is_guest"):
+        default_expiry = timedelta(days=GUEST_TOKEN_EXPIRE_DAYS)
+    else:
+        default_expiry = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.utcnow() + default_expiry
+        
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -112,12 +124,33 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         email: str = payload.get("sub")
         if email is None:
             raise credentials_exception
-        token_data = TokenData(email=email)
+        
+        # Extract guest flag from token if present
+        is_guest: bool = payload.get("is_guest", False)
+        token_data = TokenData(email=email, is_guest=is_guest)
     except JWTError:
         raise credentials_exception
+    
     user = get_user(db, email=token_data.email)
     if user is None:
         raise credentials_exception
+    
+    # Handle guest users that have been merged into regular accounts
+    if user.merged_into_user_id:
+        # Get the real user that this guest was merged into
+        real_user = db.query(User).filter_by(id=user.merged_into_user_id).first()
+        if real_user:
+            logging.info(f"Guest user {user.id} has been merged into user {real_user.id}, using the real user")
+            return real_user
+        else:
+            logging.error(f"Guest user {user.id} was merged into user {user.merged_into_user_id} but that user was not found")
+            raise credentials_exception
+    
+    # Update last_active_at for guest users
+    if user.is_guest:
+        user.last_active_at = datetime.utcnow()
+        db.commit()
+    
     return user
 
 async def get_current_active_user(current_user = Depends(get_current_user), request: Request = None):
@@ -149,7 +182,7 @@ async def get_current_active_user(current_user = Depends(get_current_user), requ
         logging.warning(f"User {current_user.id} is inactive")
         raise HTTPException(status_code=400, detail="Inactive user")
     
-    logging.info(f"Successfully authenticated user: {current_user.id}")
+    logging.info(f"Successfully authenticated user: {current_user.id} (guest: {current_user.is_guest})")
     return current_user
 
 async def get_current_user_optional(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -166,13 +199,28 @@ async def get_current_user_optional(token: str = Depends(oauth2_scheme), db: Ses
         email: str = payload.get("sub")
         if email is None:
             return None
-        token_data = TokenData(email=email)
+        
+        # Extract guest flag from token if present
+        is_guest: bool = payload.get("is_guest", False)
+        token_data = TokenData(email=email, is_guest=is_guest)
     except JWTError:
         return None
     
     user = get_user(db, email=token_data.email)
     if user is None or not user.is_active:
         return None
+    
+    # Handle guest users that have been merged into regular accounts
+    if user.merged_into_user_id:
+        # Get the real user that this guest was merged into
+        real_user = db.query(User).filter_by(id=user.merged_into_user_id).first()
+        if real_user:
+            return real_user
+    
+    # Update last_active_at for guest users
+    if user.is_guest:
+        user.last_active_at = datetime.utcnow()
+        db.commit()
         
     return user
 

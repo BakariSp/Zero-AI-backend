@@ -12,7 +12,7 @@ from sqlalchemy.sql import text
 from sqlalchemy import func
 
 from app.db import get_db
-from app.auth.jwt import get_current_active_user
+from app.auth.jwt import get_current_active_user, get_current_user
 from app.models import User, LearningPath, UserLearningPath, CourseSection, UserCourse, UserSection, user_cards, Course, course_section_association, section_cards, Card, learning_path_courses, user_section_cards
 from app.learning_paths.schemas import (
     LearningPathCreate,
@@ -134,7 +134,7 @@ def update_card_completion_in_learning_path_refactored(
     card_id: int,
     body: CardCompletionRequestBody,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Update completion status for a card within a specific learning path and section context.
@@ -427,7 +427,7 @@ def read_learning_paths(
     limit: int = 100,
     category: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Get all learning paths with optional category filter"""
     learning_paths = get_learning_paths(db, skip=skip, limit=limit, category=category)
@@ -436,7 +436,7 @@ def read_learning_paths(
 @router.get("/learning-paths/basic", response_model=List[LearningPathBasicInfo])
 def read_all_learning_paths_basic(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a basic list of all learning paths (id, name, description, state).
@@ -449,7 +449,7 @@ def read_all_learning_paths_basic(
 def read_learning_path(
     path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Get a specific learning path by ID"""
     try:
@@ -473,7 +473,7 @@ def read_learning_path(
 def create_new_learning_path(
     learning_path: LearningPathCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Create a new learning path (admin only)"""
     if not current_user.is_superuser:
@@ -489,7 +489,7 @@ def update_existing_learning_path(
     path_id: int,
     learning_path: LearningPathUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Update an existing learning path (admin only)"""
     if not current_user.is_superuser:
@@ -508,7 +508,7 @@ def update_existing_learning_path(
 def delete_existing_learning_path(
     path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Delete a learning path (admin only)"""
     if not current_user.is_superuser:
@@ -523,7 +523,7 @@ def delete_existing_learning_path(
 @router.get("/users/me/learning-paths", response_model=List[UserLearningPathResponse])
 def read_user_learning_paths(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Get all learning paths for the current user"""
     return get_user_learning_paths(db=db, user_id=current_user.id)
@@ -531,7 +531,7 @@ def read_user_learning_paths(
 @router.get("/users/me/learning-paths/basic", response_model=List[LearningPathBasicInfo])
 def read_my_learning_paths_basic(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a basic list (id, name, description, state) of learning paths
@@ -548,7 +548,7 @@ def read_user_learning_path(
     path_id: int,
     response: Response,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a specific learning path for the current user with progress information for all courses, sections, and cards.
@@ -869,7 +869,7 @@ def read_user_learning_path_full(
     path_id: int,
     response: Response,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a complete learning path for the current user, including all courses, sections, and cards.
@@ -1159,7 +1159,7 @@ def read_user_learning_path_full(
 def add_learning_path_to_user(
     user_path: UserLearningPathCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Add an existing learning path to the current user"""
     # Check if learning path exists
@@ -1229,7 +1229,7 @@ def update_user_learning_path(
     path_id: int,
     user_path_update: UserLearningPathUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Update progress for a user's learning path"""
     user_path = get_user_learning_path(db, user_id=current_user.id, path_id=path_id)
@@ -1270,7 +1270,7 @@ def update_user_learning_path(
 async def generate_ai_learning_path(
     request: GenerateLearningPathRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """Generate a learning path using AI based on user interests"""
     try:
@@ -1393,7 +1393,7 @@ async def generate_sections_from_titles(request: GenerateDetailsFromOutlineReque
 def delete_my_learning_path(
     path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Delete a learning path assigned to the current user.
@@ -1440,7 +1440,7 @@ def delete_my_learning_path(
 def add_learning_path_to_user_collection(
     path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Add a learning path to the user's collection by creating a personal copy.
@@ -1482,7 +1482,7 @@ def add_learning_path_to_user_collection(
 @router.get("/users/me/section-ids", status_code=status.HTTP_200_OK)
 def get_section_mapping(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get a mapping of all user section IDs to template section IDs.
@@ -1555,7 +1555,7 @@ def get_section_mapping(
 def debug_section(
     section_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Debug endpoint to get detailed information about a specific section.
