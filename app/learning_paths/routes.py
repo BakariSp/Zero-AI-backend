@@ -54,7 +54,7 @@ from app.achievements.crud import check_completion_achievements
 from app.sections.crud import find_user_section
 from app.cards.crud import get_user_card_by_id as crud_get_user_card_by_id, save_card_for_user as crud_save_card_for_user, update_user_card as crud_update_user_card
 from app.progress.utils import cascade_progress_update
-
+from sqlalchemy import update
 router = APIRouter()
 
 # Pydantic models for the card completion endpoint (as per docs/progress_update.md)
@@ -159,7 +159,7 @@ def update_card_completion_in_learning_path_refactored(
 
         if not card_entry:
             raise HTTPException(status_code=404, detail="Card not found in section")
-
+    
         # 3. Update is_completed for that specific user_section_card
         db.execute(
         
@@ -170,7 +170,36 @@ def update_card_completion_in_learning_path_refactored(
             )
             .values(is_completed=is_completed)
         )
+        # 先查出原始 is_completed 状态
+        original_entry = db.execute(
+            user_cards.select().where(
+                user_cards.c.user_id == current_user.id,
+                user_cards.c.card_id == card_id
+            )
+        ).first()
+
+        logging.info(f"[MARK] 🟡 Before update - user_id: {current_user.id}, card_id: {card_id}, is_completed: {original_entry.is_completed if original_entry else 'Not Found'}")
+
+        # 执行更新
+        db.execute(
+            user_cards.update()
+            .where(
+                user_cards.c.user_id == current_user.id,
+                user_cards.c.card_id == card_id
+            )
+            .values(is_completed=is_completed)
+        )
         db.commit()
+
+        # 再查出更新后的状态
+        updated_entry = db.execute(
+            user_cards.select().where(
+                user_cards.c.user_id == current_user.id,
+                user_cards.c.card_id == card_id
+            )
+        ).first()
+
+        logging.info(f"[MARK] 🟢 After update - user_id: {current_user.id}, card_id: {card_id}, is_completed: {updated_entry.is_completed if updated_entry else 'Not Found'}")
 
         # 4. Recalculate section progress
         total_cards = db.query(user_section_cards).filter(
