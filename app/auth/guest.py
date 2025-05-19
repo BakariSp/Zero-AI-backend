@@ -10,7 +10,8 @@ from app.models import User, UserLearningPath, LearningPath, Course, UserCourse
 from app.auth.jwt import create_access_token, get_current_user
 from app.users.schemas import GuestUserResponse, MergeAccountRequest, MergeAccountResponse
 from app.users.crud import get_user
-
+from pydantic import BaseModel
+from typing import Optional
 router = APIRouter()
 
 # Set up logging
@@ -187,3 +188,50 @@ def update_guest_activity_endpoint(
         )
     
     return {"status": "updated", "message": "Guest user activity timestamp updated"} 
+
+
+class GuestCreateRequest(BaseModel):
+    anonymous_id: Optional[str] = None
+    email: Optional[str] = None
+
+@router.post("/guest", response_model=GuestUserResponse)
+def create_guest_user_endpoint(
+    payload: GuestCreateRequest,
+    db: Session = Depends(get_db)
+):
+    # 使用 anonymous_id 构造 email
+    anonymous_id = payload.anonymous_id
+    email = f"{anonymous_id}@guest.temporary"
+
+    # 先查是否已存在（幂等）
+    user = db.query(User).filter(User.anonymous_id == anonymous_id).first()
+    if user:
+        token = create_access_token(data={"sub": user.email, "is_guest": True})
+        return GuestUserResponse(
+            id=user.id,
+            is_guest=True,
+            token=token,
+            created_at=user.created_at
+        )
+
+    # 否则新建 guest user
+    user = User(
+        email=email,
+        username=email.split("@")[0],
+        anonymous_id=anonymous_id,
+        is_guest=True,
+        is_active=True,
+        created_at=datetime.utcnow(),
+        last_active_at=datetime.utcnow()
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    token = create_access_token(data={"sub": user.email, "is_guest": True})
+    return GuestUserResponse(
+        id=user.id,
+        is_guest=True,
+        token=token,
+        created_at=user.created_at
+    )
