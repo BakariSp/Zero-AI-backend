@@ -10,7 +10,8 @@ from app.models import User, UserLearningPath, LearningPath, Course, UserCourse
 from app.auth.jwt import create_access_token, get_current_user
 from app.users.schemas import GuestUserResponse, MergeAccountRequest, MergeAccountResponse
 from app.users.crud import get_user
-
+from pydantic import BaseModel
+from typing import Optional
 router = APIRouter()
 
 # Set up logging
@@ -110,17 +111,6 @@ def update_guest_activity(db: Session, user_id: int) -> bool:
         return True
     return False
 
-@router.post("/guest", response_model=GuestUserResponse)
-def create_guest_user_endpoint(db: Session = Depends(get_db)):
-    """Create a new guest account"""
-    guest_user = create_guest_user(db)
-    token = create_access_token(data={"sub": guest_user.email, "is_guest": True})
-    return GuestUserResponse(
-        id=guest_user.id,
-        is_guest=True,
-        token=token,
-        created_at=guest_user.created_at
-    )
 
 @router.post("/merge", response_model=MergeAccountResponse)
 def merge_accounts(
@@ -187,3 +177,52 @@ def update_guest_activity_endpoint(
         )
     
     return {"status": "updated", "message": "Guest user activity timestamp updated"} 
+
+
+class GuestCreateRequest(BaseModel):
+    username: str
+    email: str
+
+@router.post("/guest", response_model=GuestUserResponse)
+def create_guest_user_endpoint(
+    payload: GuestCreateRequest,
+    db: Session = Depends(get_db)
+):
+    # 使用 username 和 email 作为 guest 用户唯一标识
+    username = payload.username
+    email = payload.email
+
+    # 先查是否已存在（幂等）
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        token = create_access_token(data={"sub": user.email, "is_guest": True})
+        return GuestUserResponse(
+            id=user.id,
+            is_guest=True,
+            token=token,
+            created_at=user.created_at
+        )
+
+    # 新建 guest user
+    new_user = User(
+        email=email,
+        username=username,
+        is_guest=True,
+        is_active=True,
+        created_at=datetime.utcnow(),
+        last_active_at=datetime.utcnow()
+    )
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    log.info(f"✅ Created new guest user: {new_user.email} (id={new_user.id})")
+
+    token = create_access_token(data={"sub": new_user.email, "is_guest": True})
+    return GuestUserResponse(
+        id=new_user.id,
+        is_guest=True,
+        token=token,
+        created_at=new_user.created_at
+    )

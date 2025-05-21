@@ -68,6 +68,7 @@ class TokenData(BaseModel):
     email: Optional[str] = None
     is_guest: Optional[bool] = False
 
+
 # Dependency to get the database session
 def get_db():
     db = SessionLocal()
