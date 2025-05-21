@@ -20,6 +20,14 @@ var/
 .installed.cfg
 *.egg
 
+*.pem
+*.key
+*.crt
+*.csr
+*.pfx
+*.p12
+
+
 # Environment variables
 .env
 .venv
