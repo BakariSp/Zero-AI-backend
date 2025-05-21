@@ -26,6 +26,13 @@ var/
 venv/
 ENV/
 
+*.pem
+*.key
+*.crt
+*.csr
+*.pfx
+*.p12
+
 # IDE
 .idea/
 .vscode/
