@@ -111,17 +111,6 @@ def update_guest_activity(db: Session, user_id: int) -> bool:
         return True
     return False
 
-@router.post("/guest", response_model=GuestUserResponse)
-def create_guest_user_endpoint(db: Session = Depends(get_db)):
-    """Create a new guest account"""
-    guest_user = create_guest_user(db)
-    token = create_access_token(data={"sub": guest_user.email, "is_guest": True})
-    return GuestUserResponse(
-        id=guest_user.id,
-        is_guest=True,
-        token=token,
-        created_at=guest_user.created_at
-    )
 
 @router.post("/merge", response_model=MergeAccountResponse)
 def merge_accounts(
@@ -191,20 +180,20 @@ def update_guest_activity_endpoint(
 
 
 class GuestCreateRequest(BaseModel):
-    anonymous_id: Optional[str] = None
-    email: Optional[str] = None
+    username: str
+    email: str
 
 @router.post("/guest", response_model=GuestUserResponse)
 def create_guest_user_endpoint(
     payload: GuestCreateRequest,
     db: Session = Depends(get_db)
 ):
-    # 使用 anonymous_id 构造 email
-    anonymous_id = payload.anonymous_id
-    email = f"{anonymous_id}@guest.temporary"
+    # 使用 username 和 email 作为 guest 用户唯一标识
+    username = payload.username
+    email = payload.email
 
     # 先查是否已存在（幂等）
-    user = db.query(User).filter(User.anonymous_id == anonymous_id).first()
+    user = db.query(User).filter(User.email == email).first()
     if user:
         token = create_access_token(data={"sub": user.email, "is_guest": True})
         return GuestUserResponse(
@@ -214,24 +203,26 @@ def create_guest_user_endpoint(
             created_at=user.created_at
         )
 
-    # 否则新建 guest user
-    user = User(
+    # 新建 guest user
+    new_user = User(
         email=email,
-        username=email.split("@")[0],
-        anonymous_id=anonymous_id,
+        username=username,
         is_guest=True,
         is_active=True,
         created_at=datetime.utcnow(),
         last_active_at=datetime.utcnow()
     )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
 
-    token = create_access_token(data={"sub": user.email, "is_guest": True})
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    log.info(f"✅ Created new guest user: {new_user.email} (id={new_user.id})")
+
+    token = create_access_token(data={"sub": new_user.email, "is_guest": True})
     return GuestUserResponse(
-        id=user.id,
+        id=new_user.id,
         is_guest=True,
         token=token,
-        created_at=user.created_at
+        created_at=new_user.created_at
     )
