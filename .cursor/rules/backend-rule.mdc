@@ -1,0 +1,11 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+use FastAPI
+use python
+use powershell, virtual env: zero-ai
+database: Supabase postgres
+
+auth: Supabase auth

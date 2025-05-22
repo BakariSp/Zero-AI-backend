@@ -16,6 +16,7 @@ from app.auth.jwt import (
     create_access_token, 
     get_current_active_user,
     get_current_user,
+    get_current_user_optional,
     ACCESS_TOKEN_EXPIRE_MINUTES,
     Token
 )
@@ -76,87 +77,69 @@ def get_fresh_db():
 # Dependency to get the current user with support for both JWT and Supabase auth
 async def get_current_user_unified(
     request: Request,
-    jwt_user: Optional[User] = Depends(get_current_user),
+    jwt_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
     """
-    Get the current user using either JWT or Supabase authentication.
-    This allows backward compatibility with existing JWT tokens while
-    supporting new Supabase authentication.
+    Get the current user with unified authentication support (JWT and Supabase).
+    This dependency is the primary auth entry point that combines both auth methods.
+    
+    Returns:
+        User object if authenticated, None otherwise
     """
     path = request.url.path
     logging.info(f"[DEBUG] get_current_user_unified called for path: {path}")
     
-    # Enhanced debugging for request state
-    logging.info(f"[DEBUG] Request state attributes: {dir(request.state)}")
-    logging.info(f"[DEBUG] Has user attribute: {hasattr(request.state, 'user')}")
-    logging.info(f"[DEBUG] Has supabase_user attribute: {hasattr(request.state, 'supabase_user')}")
+    # CRITICAL FIX: Check request.state.user FIRST and return immediately if it's a User object
+    # This bypasses all the problematic dependency chain issues
+    if hasattr(request.state, "user") and isinstance(request.state.user, User):
+        logging.info(f"[DEBUG] IMMEDIATE RETURN: Found User object in request.state.user with ID: {request.state.user.id}")
+        return request.state.user
     
-    # CRITICAL DEBUG: Log the authorization header
-    auth_header = request.headers.get("Authorization")
-    logging.info(f"[DEBUG] Authorization header exists: {auth_header is not None}")
-    if auth_header:
-        # Only log part of the token for security
-        token_preview = auth_header.split(' ')[1][:10] + "..." if auth_header.startswith("Bearer ") else "invalid format"
-        logging.info(f"[DEBUG] Token preview: {token_preview}")
+    # Add detailed debugging at the very start
+    logging.info(f"[DEBUG] === DETAILED REQUEST STATE DEBUG ===")
+    logging.info(f"[DEBUG] hasattr(request.state, 'user'): {hasattr(request.state, 'user')}")
+    if hasattr(request.state, 'user'):
+        logging.info(f"[DEBUG] request.state.user is None: {request.state.user is None}")
+        logging.info(f"[DEBUG] type(request.state.user): {type(request.state.user)}")
+        if request.state.user is not None:
+            if isinstance(request.state.user, User):
+                logging.info(f"[DEBUG] request.state.user.id: {request.state.user.id}")
+                logging.info(f"[DEBUG] request.state.user.email: {request.state.user.email}")
+            elif isinstance(request.state.user, dict):
+                logging.info(f"[DEBUG] request.state.user dict keys: {request.state.user.keys()}")
+    logging.info(f"[DEBUG] jwt_user from dependency: {jwt_user}")
+    logging.info(f"[DEBUG] === END DETAILED DEBUG ===")
     
-    # First check if we have a user from Supabase auth in the request state
-    if hasattr(request.state, "user") and request.state.user is not None:
-        logging.info(f"[DEBUG] User exists in request.state.user: {type(request.state.user)}")
-        
-        if isinstance(request.state.user, User):
-            logging.info(f"[DEBUG] User from request.state.user is a User model instance with ID: {request.state.user.id}")
-            # CRITICAL FIX: Return the user immediately without trying to refresh or validate further
-            # This is the most reliable source of user information at this point
-            return request.state.user
-        elif isinstance(request.state.user, dict):
-            # Legacy dictionary format, try to convert to a User object
-            try:
-                user_email = request.state.user.get('email')
-                logging.info(f"[DEBUG] User from request.state.user is a dict with email: {user_email}")
-                if user_email:
-                    # Try with current db session
+    # Handle dict user from request.state
+    if hasattr(request.state, "user") and isinstance(request.state.user, dict):
+        # Legacy dictionary format, try to convert to a User object
+        try:
+            user_email = request.state.user.get('email')
+            logging.info(f"[DEBUG] User from request.state.user is a dict with email: {user_email}")
+            if user_email:
+                # Try with current db session - but catch any JWT auth errors
+                try:
                     db_user = get_user_by_email(db, email=user_email)
                     if db_user:
                         logging.info(f"[DEBUG] Successfully retrieved user from DB by email: {db_user.id}")
                         return db_user
-                    else:
-                        # Try with a fresh db connection as fallback
-                        logging.warning(f"[DEBUG] DB lookup failed with primary session, trying fresh connection")
-                        fresh_db = get_fresh_db()
-                        try:
-                            db_user = get_user_by_email(fresh_db, email=user_email)
-                            if db_user:
-                                logging.info(f"[DEBUG] Successfully retrieved user from fresh DB by email: {db_user.id}")
-                                # Create a copy of the user attributes to avoid session issues
-                                user_copy = User(
-                                    id=db_user.id,
-                                    email=db_user.email,
-                                    username=db_user.username,
-                                    full_name=db_user.full_name,
-                                    hashed_password=None,  # Security: don't copy password hash
-                                    is_active=db_user.is_active,
-                                    is_superuser=db_user.is_superuser,
-                                    oauth_provider=db_user.oauth_provider,
-                                    oauth_id=db_user.oauth_id,
-                                    profile_picture=db_user.profile_picture,
-                                    interests=db_user.interests,
-                                    subscription_type=db_user.subscription_type,
-                                    subscription_start_date=db_user.subscription_start_date,
-                                    subscription_expiry_date=db_user.subscription_expiry_date,
-                                    created_at=db_user.created_at
-                                )
-                                return user_copy
-                        finally:
-                            fresh_db.close()
-                        
-                        logging.warning(f"[DEBUG] DB lookup failed: User with email {user_email} not found in database")
-                else:
-                    logging.warning("[DEBUG] User dict from request.state has no email")
-            except Exception as e:
-                logging.error(f"[DEBUG] Error converting legacy user dict to User: {str(e)}")
-    else:
-        logging.info(f"[DEBUG] No user in request.state.user for path: {path}")
+                except Exception as db_error:
+                    # If DB query fails due to auth issues, create a temporary user
+                    logging.warning(f"[DEBUG] DB lookup failed due to: {str(db_error)}, creating temporary user")
+                    # Create a temporary user from the dict data
+                    temp_user = User(
+                        id=request.state.user.get("id", 0),
+                        email=user_email,
+                        username=user_email.split("@")[0],
+                        full_name=request.state.user.get("full_name", ""),
+                        is_active=True,
+                        oauth_provider="supabase",
+                        subscription_type="free"
+                    )
+                    return temp_user
+        except Exception as e:
+            logging.error(f"[DEBUG] Error converting legacy user dict to User: {str(e)}")
     
     # If no user in request.state.user, check for Supabase user data
     if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
@@ -164,186 +147,35 @@ async def get_current_user_unified(
         email = request.state.supabase_user.get("email")
         if email:
             logging.info(f"[DEBUG] Looking up user with email {email} in database")
-            db_user = get_user_by_email(db, email=email)
-            if db_user:
-                logging.info(f"[DEBUG] Found user in database for email {email}: {db_user.id}")
-                return db_user
-            else:
-                # Try with a fresh db connection as fallback
-                logging.warning(f"[DEBUG] DB lookup failed with primary session, trying fresh connection for supabase_user")
-                fresh_db = get_fresh_db()
-                try:
-                    db_user = get_user_by_email(fresh_db, email=email)
-                    if db_user:
-                        logging.info(f"[DEBUG] Successfully retrieved user from fresh DB by supabase email: {db_user.id}")
-                        # Create a copy of the user attributes to avoid session issues
-                        user_copy = User(
-                            id=db_user.id,
-                            email=db_user.email,
-                            username=db_user.username,
-                            full_name=db_user.full_name,
-                            hashed_password=None,  # Security: don't copy password hash
-                            is_active=db_user.is_active,
-                            is_superuser=db_user.is_superuser,
-                            oauth_provider=db_user.oauth_provider,
-                            oauth_id=db_user.oauth_id,
-                            profile_picture=db_user.profile_picture,
-                            interests=db_user.interests,
-                            subscription_type=db_user.subscription_type,
-                            subscription_start_date=db_user.subscription_start_date,
-                            subscription_expiry_date=db_user.subscription_expiry_date,
-                            created_at=db_user.created_at
-                        )
-                        return user_copy
-                finally:
-                    fresh_db.close()
-                
-                logging.warning(f"[DEBUG] User with email {email} not found in database despite Supabase auth")
-                
-                # Auto-create user if they exist in Supabase but not in our database
-                try:
-                    logging.info(f"[DEBUG] Auto-creating user for Supabase-authenticated email: {email}")
-                    
-                    # Generate username from email
-                    username = email.split("@")[0]
-                    
-                    # Get any available metadata
-                    supabase_data = request.state.supabase_user
-                    full_name = supabase_data.get("user_metadata", {}).get("full_name", "")
-                    if not full_name:
-                        full_name = supabase_data.get("name", "")
-                        
-                    # Create user data
-                    user_data = UserCreate(
-                        email=email,
-                        username=username,
-                        password="",  # No password for Supabase users
-                        full_name=full_name,
-                        is_active=True
-                    )
-                    
-                    # Create the user in the database
-                    new_user = create_user(
-                        db=db,
-                        user=user_data,
-                        oauth_provider="supabase",
-                        oauth_id=supabase_data.get("id"),
-                        profile_picture=supabase_data.get("avatar_url", "")
-                    )
-                    
-                    # Commit changes
-                    db.commit()
-                    
-                    logging.info(f"[DEBUG] Successfully created user account from handler: {new_user.id}")
-                    return new_user
-                except Exception as e:
-                    db.rollback()
-                    logging.error(f"[DEBUG] Failed to auto-create user: {str(e)}")
-    else:
-        logging.info(f"[DEBUG] No supabase_user in request.state for path: {path}")
-    
-    # Fall back to JWT auth
-    if jwt_user is not None:
-        logging.info(f"[DEBUG] Using user from JWT auth: {jwt_user.id}")
-        return jwt_user
-    else:
-        logging.info(f"[DEBUG] No JWT user available for path: {path}")
-    
-    # Direct verification as last resort
-    # Only try this if we don't have user data from middleware
-    try:
-        # Only verify token if we haven't been able to get a user by now
-        if auth_header and auth_header.startswith("Bearer "):
-            logging.info("[DEBUG] Attempting direct Supabase token verification as last resort")
-            supabase_user = await verify_supabase_token(request)
-            if supabase_user and "email" in supabase_user:
-                email = supabase_user.get("email")
-                logging.info(f"[DEBUG] Direct verification found Supabase user with email: {email}")
+            try:
                 db_user = get_user_by_email(db, email=email)
                 if db_user:
-                    logging.info(f"[DEBUG] Found user in database via direct verification: {db_user.id}")
+                    logging.info(f"[DEBUG] Found user in database for email {email}: {db_user.id}")
                     return db_user
-                else:
-                    # Try with a fresh db connection as fallback
-                    logging.warning(f"[DEBUG] DB lookup failed with primary session, trying fresh connection for direct verification")
-                    fresh_db = get_fresh_db()
-                    try:
-                        db_user = get_user_by_email(fresh_db, email=email)
-                        if db_user:
-                            logging.info(f"[DEBUG] Successfully retrieved user from fresh DB by direct verification: {db_user.id}")
-                            # Create a copy of the user attributes to avoid session issues
-                            user_copy = User(
-                                id=db_user.id,
-                                email=db_user.email,
-                                username=db_user.username,
-                                full_name=db_user.full_name,
-                                hashed_password=None,  # Security: don't copy password hash
-                                is_active=db_user.is_active,
-                                is_superuser=db_user.is_superuser,
-                                oauth_provider=db_user.oauth_provider,
-                                oauth_id=db_user.oauth_id,
-                                profile_picture=db_user.profile_picture,
-                                interests=db_user.interests,
-                                subscription_type=db_user.subscription_type,
-                                subscription_start_date=db_user.subscription_start_date,
-                                subscription_expiry_date=db_user.subscription_expiry_date,
-                                created_at=db_user.created_at
-                            )
-                            return user_copy
-                    finally:
-                        fresh_db.close()
-                    
-                    logging.warning(f"[DEBUG] User with email {email} not found in database after direct verification")
-                    
-                    # Auto-create user if they exist in Supabase but not in our database
-                    try:
-                        logging.info(f"[DEBUG] Auto-creating user for directly verified email: {email}")
-                        
-                        # Generate username from email
-                        username = email.split("@")[0]
-                        
-                        # Create user data
-                        user_data = UserCreate(
-                            email=email,
-                            username=username,
-                            password="",  # No password for Supabase users
-                            full_name=supabase_user.get("name", ""),
-                            is_active=True
-                        )
-                        
-                        # Create the user in the database
-                        new_user = create_user(
-                            db=db,
-                            user=user_data,
-                            oauth_provider="supabase",
-                            oauth_id=supabase_user.get("id"),
-                            profile_picture=supabase_user.get("avatar_url", "")
-                        )
-                        
-                        # Commit changes
-                        db.commit()
-                        
-                        logging.info(f"[DEBUG] Successfully created user account from direct verification: {new_user.id}")
-                        return new_user
-                    except Exception as e:
-                        db.rollback()
-                        logging.error(f"[DEBUG] Failed to auto-create user from direct verification: {str(e)}")
-                        
-                        # As a last resort, create a temporary user object without DB persistence
-                        logging.warning(f"[DEBUG] Creating temporary User object for email {email} without DB persistence")
-                        temp_user = User(
-                            id=supabase_user.get("id", 0),  # Use Supabase ID or placeholder
-                            email=email,
-                            username=username,
-                            full_name=supabase_user.get("name", ""),
-                            is_active=True,
-                            oauth_provider="supabase",
-                            oauth_id=supabase_user.get("id"),
-                            subscription_type="free"  # Default to free tier
-                        )
-                        return temp_user
+            except Exception as db_error:
+                logging.warning(f"[DEBUG] DB lookup failed for Supabase user due to: {str(db_error)}")
+            
+            # If DB lookup fails or user not found, create temporary user
+            logging.info(f"[DEBUG] Creating temporary user for Supabase email: {email}")
+            supabase_data = request.state.supabase_user
+            temp_user = User(
+                id=supabase_data.get("id", 0),
+                email=email,
+                username=email.split("@")[0],
+                full_name=supabase_data.get("name", ""),
+                is_active=True,
+                oauth_provider="supabase",
+                subscription_type="free"
+            )
+            return temp_user
+    
+    # Fall back to JWT auth only if no middleware user data
+    try:
+        if jwt_user is not None:
+            logging.info(f"[DEBUG] Using user from JWT auth: {jwt_user.id}")
+            return jwt_user
     except Exception as e:
-        logging.error(f"[DEBUG] Error during direct Supabase verification: {str(e)}")
+        logging.warning(f"[DEBUG] JWT auth failed: {str(e)}")
     
     # No valid user found
     logging.warning(f"[DEBUG] No authenticated user found for {request.url.path}")
@@ -361,331 +193,95 @@ async def get_current_active_user_unified(
     """
     path = request.url.path
     logging.info(f"[DEBUG] get_current_active_user_unified called for path: {path}")
-    logging.info(f"[DEBUG] current_user from get_current_user_unified: {current_user}")
-    logging.info(f"[DEBUG] Has user in request.state: {hasattr(request.state, 'user')}")
-    if hasattr(request.state, "user"):
-        logging.info(f"[DEBUG] Type of request.state.user: {type(request.state.user)}")
-        if isinstance(request.state.user, User):
-            logging.info(f"[DEBUG] request.state.user is a User object with ID: {request.state.user.id}")
     
     # For OPTIONS requests, skip auth check
     if request.method == "OPTIONS":
         logging.info("[DEBUG] OPTIONS request detected, skipping auth check")
         return None
-        
-    # CRITICAL FIX: If current_user is None but we have a User object in request.state, use it directly
-    # This short-circuits the authentication flow and uses the verified user from middleware
-    if current_user is None and hasattr(request.state, "user") and isinstance(request.state.user, User):
-        logging.info(f"[DEBUG] CRITICAL FIX: Using User object directly from request.state: {request.state.user.id}")
+    
+    # CRITICAL FIX: Check request.state.user FIRST and use it directly if it's a User object
+    if hasattr(request.state, "user") and isinstance(request.state.user, User):
+        logging.info(f"[DEBUG] IMMEDIATE RETURN from get_current_active_user_unified: Using User object from request.state: {request.state.user.id}")
+        # Check if the user is active
+        if not request.state.user.is_active:
+            logging.error(f"[DEBUG] User {request.state.user.id} is not active")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
         return request.state.user
     
-    # CRITICAL FIX: Use user from request.state if available and dependency didn't retrieve it
-    if current_user is None and hasattr(request.state, "user") and request.state.user is not None:
+    # Immediate debug of the current_user parameter
+    logging.info(f"[DEBUG] === ACTIVE USER UNIFIED DEBUG ===")
+    logging.info(f"[DEBUG] current_user parameter type: {type(current_user)}")
+    logging.info(f"[DEBUG] current_user is None: {current_user is None}")
+    if current_user is not None:
+        logging.info(f"[DEBUG] current_user.id: {current_user.id}")
+        logging.info(f"[DEBUG] current_user.email: {current_user.email}")
+    
+    # Check request.state directly
+    logging.info(f"[DEBUG] Has user in request.state: {hasattr(request.state, 'user')}")
+    if hasattr(request.state, "user"):
+        logging.info(f"[DEBUG] Type of request.state.user: {type(request.state.user)}")
+        if isinstance(request.state.user, User):
+            logging.info(f"[DEBUG] request.state.user is a User object with ID: {request.state.user.id}")
+    logging.info(f"[DEBUG] === END ACTIVE USER DEBUG ===")
+        
+    # If we have a current_user from the dependency, use it
+    if current_user is not None:
+        # Check if the user is active
+        if not current_user.is_active:
+            logging.error(f"[DEBUG] User {current_user.id} is not active")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
+        logging.info(f"[DEBUG] User {current_user.id} is authenticated and active for {path}")
+        return current_user
+    
+    # If current_user is None but we have user data in request.state, try to use it
+    if hasattr(request.state, "user") and request.state.user is not None:
         logging.info("[DEBUG] Retrieving user from request.state that was lost in the dependency chain")
         
-        # If it's already a User object, use it directly
-        if isinstance(request.state.user, User):
-            logging.info(f"[DEBUG] Using User object from request.state.user: {request.state.user.id}")
-            current_user = request.state.user
-            return current_user  # Return immediately to avoid further processing
-        # If it's a dict, look up the user in the database
-        elif isinstance(request.state.user, dict) and 'email' in request.state.user:
+        # If it's a dict, create a temporary user
+        if isinstance(request.state.user, dict) and 'email' in request.state.user:
             email = request.state.user.get('email')
-            logging.info(f"[DEBUG] Looking up user by email from request.state.user dict: {email}")
-            db_user = get_user_by_email(db, email=email)
-            if db_user:
-                logging.info(f"[DEBUG] Found user in database for email {email}: {db_user.id}")
-                current_user = db_user
-                return current_user  # Return immediately to avoid further processing
-            else:
-                logging.warning(f"[DEBUG] User lookup failed: User with email {email} not found in database")
-                
-                # Try with fresh db session
-                try:
-                    fresh_db = get_fresh_db()
-                    db_user = get_user_by_email(fresh_db, email=email)
-                    if db_user:
-                        logging.info(f"[DEBUG] Found user in fresh database session for email {email}: {db_user.id}")
-                        # Create a copy of the user to avoid session issues
-                        current_user = User(
-                            id=db_user.id,
-                            email=db_user.email,
-                            username=db_user.username,
-                            full_name=db_user.full_name,
-                            hashed_password=None,  # Security: don't copy password hash
-                            is_active=db_user.is_active,
-                            is_superuser=db_user.is_superuser,
-                            oauth_provider=db_user.oauth_provider,
-                            oauth_id=db_user.oauth_id,
-                            profile_picture=db_user.profile_picture,
-                            interests=db_user.interests,
-                            subscription_type=db_user.subscription_type,
-                            subscription_start_date=db_user.subscription_start_date,
-                            subscription_expiry_date=db_user.subscription_expiry_date,
-                            created_at=db_user.created_at
-                        )
-                        return current_user  # Return immediately to avoid further processing
-                finally:
-                    if 'fresh_db' in locals():
-                        fresh_db.close()
+            logging.info(f"[DEBUG] Creating temporary user from request.state dict with email: {email}")
+            temp_user = User(
+                id=request.state.user.get("id", 0),
+                email=email,
+                username=email.split("@")[0],
+                full_name=request.state.user.get("full_name", ""),
+                is_active=True,
+                oauth_provider="supabase",
+                subscription_type="free"
+            )
+            return temp_user
     
-    # For troubleshooting - direct check during debugging
-    if current_user is None:
-        logging.error(f"[DEBUG] current_user is None in get_current_active_user_unified for path: {path}")
-        
-        # Log the request headers for debugging
-        auth_header = request.headers.get("Authorization")
-        logging.info(f"[DEBUG] Authorization header in get_current_active_user_unified: {auth_header is not None}")
-        
-        # Check if we have Supabase user data in request state
-        if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-            logging.info("[DEBUG] Found Supabase user data in request.state.supabase_user")
-            email = request.state.supabase_user.get("email")
-            if email:
-                logging.info(f"[DEBUG] Looking up user with email {email} in database from supabase_user state")
-                try:
-                    db_user = get_user_by_email(db, email=email)
-                    if db_user:
-                        logging.info(f"[DEBUG] Found user in database for email {email}: {db_user.id}")
-                        return db_user
-                    else:
-                        logging.warning(f"[DEBUG] User lookup failed: User with email {email} not found in database from supabase_user")
-                        
-                        # Try with fresh db session
-                        try:
-                            fresh_db = get_fresh_db()
-                            db_user = get_user_by_email(fresh_db, email=email)
-                            if db_user:
-                                logging.info(f"[DEBUG] Found user in fresh database session for email {email}: {db_user.id}")
-                                # Create a copy of the user to avoid session issues
-                                user_copy = User(
-                                    id=db_user.id,
-                                    email=db_user.email,
-                                    username=db_user.username,
-                                    full_name=db_user.full_name,
-                                    hashed_password=None,  # Security: don't copy password hash
-                                    is_active=db_user.is_active,
-                                    is_superuser=db_user.is_superuser,
-                                    oauth_provider=db_user.oauth_provider,
-                                    oauth_id=db_user.oauth_id,
-                                    profile_picture=db_user.profile_picture,
-                                    interests=db_user.interests,
-                                    subscription_type=db_user.subscription_type,
-                                    subscription_start_date=db_user.subscription_start_date,
-                                    subscription_expiry_date=db_user.subscription_expiry_date,
-                                    created_at=db_user.created_at
-                                )
-                                return user_copy
-                        finally:
-                            if 'fresh_db' in locals():
-                                fresh_db.close()
-                        
-                        # Auto-create user if they don't exist
-                        logging.warning(f"[DEBUG] Auto-creating user for Supabase-authenticated email: {email}")
-                        
-                        try:
-                            # Generate username from email
-                            username = email.split("@")[0]
-                            
-                            # Get any available metadata
-                            supabase_data = request.state.supabase_user
-                            full_name = supabase_data.get("user_metadata", {}).get("full_name", "")
-                            if not full_name:
-                                full_name = supabase_data.get("name", "")
-                                
-                            # Create user data
-                            user_data = UserCreate(
-                                email=email,
-                                username=username,
-                                password="",  # No password for Supabase users
-                                full_name=full_name,
-                                is_active=True
-                            )
-                            
-                            # Create the user in the database
-                            new_user = create_user(
-                                db=db,
-                                user=user_data,
-                                oauth_provider="supabase",
-                                oauth_id=supabase_data.get("id"),
-                                profile_picture=supabase_data.get("avatar_url", "")
-                            )
-                            
-                            # Commit changes
-                            db.commit()
-                            
-                            logging.info(f"[DEBUG] Successfully created user account from dependency: {new_user.id}")
-                            current_user = new_user
-                        except Exception as e:
-                            db.rollback()
-                            logging.error(f"[DEBUG] Failed to auto-create user in dependency: {str(e)}")
-                except Exception as e:
-                    logging.error(f"[DEBUG] Error looking up user: {str(e)}")
-        
-        # Fallback: Try direct token verification
-        if current_user is None and auth_header and auth_header.startswith("Bearer "):
-            try:
-                logging.info("[DEBUG] Attempting token verification fallback")
-                # Verify the token directly
-                supabase_user = await verify_supabase_token(request)
-                if supabase_user and "email" in supabase_user:
-                    email = supabase_user.get("email")
-                    logging.info(f"[DEBUG] Token verification found email: {email}")
-                    
-                    # Look up user in database
-                    db_user = get_user_by_email(db, email=email)
-                    if db_user:
-                        logging.info(f"[DEBUG] Found user via token verification: {db_user.id}")
-                        current_user = db_user
-                    else:
-                        logging.warning(f"[DEBUG] User lookup failed: User with email {email} not found in database after token verification")
-                        
-                        # Try with fresh db session
-                        try:
-                            fresh_db = get_fresh_db()
-                            db_user = get_user_by_email(fresh_db, email=email)
-                            if db_user:
-                                logging.info(f"[DEBUG] Found user in fresh database session via token verification: {db_user.id}")
-                                # Create a copy of the user to avoid session issues
-                                current_user = User(
-                                    id=db_user.id,
-                                    email=db_user.email,
-                                    username=db_user.username,
-                                    full_name=db_user.full_name,
-                                    hashed_password=None,  # Security: don't copy password hash
-                                    is_active=db_user.is_active,
-                                    is_superuser=db_user.is_superuser,
-                                    oauth_provider=db_user.oauth_provider,
-                                    oauth_id=db_user.oauth_id,
-                                    profile_picture=db_user.profile_picture,
-                                    interests=db_user.interests,
-                                    subscription_type=db_user.subscription_type,
-                                    subscription_start_date=db_user.subscription_start_date,
-                                    subscription_expiry_date=db_user.subscription_expiry_date,
-                                    created_at=db_user.created_at
-                                )
-                                return user_copy
-                        finally:
-                            if 'fresh_db' in locals():
-                                fresh_db.close()
-                        
-                        # Auto-create user if verified but not in database
-                        logging.warning(f"[DEBUG] User with email {email} authenticated but not in database")
-                        try:
-                            # Generate username from email
-                            username = email.split("@")[0]
-                            
-                            # Create user data
-                            user_data = UserCreate(
-                                email=email,
-                                username=username,
-                                password="",  # No password for Supabase users
-                                full_name=supabase_user.get("name", ""),
-                                is_active=True
-                            )
-                            
-                            # Create the user in the database
-                            new_user = create_user(
-                                db=db,
-                                user=user_data,
-                                oauth_provider="supabase",
-                                oauth_id=supabase_user.get("id"),
-                                profile_picture=supabase_user.get("avatar_url", "")
-                            )
-                            
-                            # Commit changes
-                            db.commit()
-                            
-                            logging.info(f"[DEBUG] Created new user during token verification: {new_user.id}")
-                            current_user = new_user
-                        except Exception as e:
-                            db.rollback()
-                            logging.error(f"[DEBUG] Failed to create user during token verification: {str(e)}")
-            except Exception as e:
-                logging.error(f"[DEBUG] Token verification fallback failed: {str(e)}")
-        
-        # SPECIAL FIX FOR SUBSCRIPTION ENDPOINT:
-        # If the request is specifically for the subscription endpoint, and we have clear
-        # evidence of authentication from the middleware, create a temporary user object
-        # to allow the request to proceed
-        if current_user is None and path in ["/api/subscription", "/api/users/me"] and hasattr(request.state, "user") and request.state.user is not None:
-            logging.warning(f"[DEBUG] SPECIAL HANDLING: Creating temporary user for {path} endpoint")
-            
-            if isinstance(request.state.user, dict) and "id" in request.state.user:
-                user_id = request.state.user.get("id")
-                email = request.state.user.get("email", "user@example.com")
-                
-                logging.info(f"[DEBUG] Creating temporary user from dict with ID: {user_id}, email: {email}")
-                
-                # Create a temporary user to allow request to proceed
-                current_user = User(
-                    id=user_id,
-                    email=email,
-                    username=email.split("@")[0],
-                    full_name="",
-                    is_active=True,
-                    subscription_type="free"  # Default to free tier
-                )
-        
-        # Last resort - check for any evidence of user identity
-        if current_user is None and auth_header:
-            logging.warning(f"[DEBUG] Last resort authentication check for {path}")
-            try:
-                # One final attempt with direct token verification
-                supabase_user = await verify_supabase_token(request)
-                if supabase_user and "email" in supabase_user:
-                    email = supabase_user.get("email")
-                    user_id = supabase_user.get("id", "temp-id")
-                    logging.info(f"[DEBUG] Last resort found email: {email}")
-                    
-                    # Create a temporary user as last resort
-                    current_user = User(
-                        id=user_id,
-                        email=email,
-                        username=email.split("@")[0],
-                        full_name="",
-                        is_active=True,
-                        subscription_type="free"  # Default to free tier
-                    )
-                    logging.info(f"[DEBUG] Created last resort temporary user with email: {email}")
-            except Exception as e:
-                logging.error(f"[DEBUG] Last resort auth failed: {str(e)}")
+    # Check for Supabase user data in request state
+    if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+        email = request.state.supabase_user.get("email")
+        if email:
+            logging.info(f"[DEBUG] Creating temporary user from Supabase data with email: {email}")
+            supabase_data = request.state.supabase_user
+            temp_user = User(
+                id=supabase_data.get("id", 0),
+                email=email,
+                username=email.split("@")[0],
+                full_name=supabase_data.get("name", ""),
+                is_active=True,
+                oauth_provider="supabase",
+                subscription_type="free"
+            )
+            return temp_user
     
-    # If we still don't have a user at this point, all authentication attempts have failed
-    if current_user is None:
-        logging.warning(f"[DEBUG] All authentication fallbacks failed for {request.url.path}")
-        logging.warning(f"[DEBUG] Request method: {request.method}, Path: {path}")
-        
-        # Let's examine request.state one more time
-        logging.info(f"[DEBUG] Final check of request.state attributes: {dir(request.state)}")
-        logging.info(f"[DEBUG] Final check - Has user attribute: {hasattr(request.state, 'user')}")
-        if hasattr(request.state, "user") and request.state.user is not None:
-            user_info = {}
-            if isinstance(request.state.user, User):
-                user_info = {"type": "User", "id": request.state.user.id, "email": request.state.user.email}
-            elif isinstance(request.state.user, dict):
-                user_info = {"type": "dict", "content": request.state.user}
-            else:
-                user_info = {"type": str(type(request.state.user))}
-            logging.info(f"[DEBUG] Final check - request.state.user info: {user_info}")
-            
-        # Fall back to creating a new HTTP exception
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
-    
-    # If we have a user, check if they're active
-    if not current_user.is_active:
-        logging.error(f"[DEBUG] User {current_user.id} is not active")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
-        )
-        
-    logging.info(f"[DEBUG] User {current_user.id} is authenticated and active for {path}")
-    return current_user
+    # If we still don't have a user at this point, authentication has failed
+    logging.warning(f"[DEBUG] All authentication fallbacks failed for {request.url.path}")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Bearer"}
+    )
 
 # User profile routes
 @router.options("/users/me")

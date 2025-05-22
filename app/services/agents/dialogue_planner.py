@@ -2,7 +2,7 @@ import logging
 import json
 import re
 import asyncio
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from openai import AzureOpenAI # Assuming sync client, use AsyncOpenAI if preferred
 from pydantic import BaseModel, Field
 
@@ -77,33 +77,31 @@ def _extract_json_from_response(content: str) -> Any:
 # --- End Shared Utility ---
 
 
-class DialoguePlannerAgent:
-    def __init__(self, client: AzureOpenAI, deployment: str):
-        """
-        Initializes the DialoguePlannerAgent and its sub-agents.
-
-        Args:
-            client: An initialized AzureOpenAI client instance.
-            deployment: The deployment name for the LLM to use for planning/reply generation.
-                        Sub-agents might use the same or different deployments based on their init.
-        """
-        self.client = client
-        self.deployment = deployment
-        logging.info(f"Initializing DialoguePlannerAgent with deployment '{deployment}'...")
-
-        # Initialize sub-agents - Pass the client and potentially specific deployments if needed
-        # For simplicity, using the same client/deployment for all now.
-        try:
-            # Assuming sub-agents also take client and deployment
-            self.path_planner = PathPlannerAgent(client, deployment)
-            self.course_generator = CourseGeneratorAgent(client, deployment)
-            self.section_generator = SectionGeneratorAgent(client, deployment)
-            self.card_generator = CardGeneratorAgent(client, deployment)
-            logging.info("All sub-agents initialized successfully.")
-        except Exception as e:
-            logging.error(f"Failed to initialize one or more sub-agents: {e}", exc_info=True)
-            # Depending on requirements, you might want to raise the error
-            # or allow the planner to work with potentially missing agents.
+class DialoguePlannerAgent:    
+    def __init__(self, client: Union[AzureOpenAI, Any], deployment: str):        
+        """        
+        Initializes the DialoguePlannerAgent and its sub-agents.        
+        Args:            
+        client: An initialized client instance (AzureOpenAI or ZhipuAIClient).            
+        deployment: The deployment/model name for the LLM to use for planning/reply generation.                        
+        Sub-agents might use the same or different deployments based on their init.        
+        """        
+        self.client = client        
+        self.deployment = deployment        
+        logging.info(f"Initializing DialoguePlannerAgent with deployment '{deployment}'...")        
+        # Initialize sub-agents - Pass the client and potentially specific deployments if needed        
+        # # For simplicity, using the same client/deployment for all now.        
+        try:            
+            # # Assuming sub-agents also take client and deployment            
+            self.path_planner = PathPlannerAgent(client, deployment)            
+            self.course_generator = CourseGeneratorAgent(client, deployment)            
+            self.section_generator = SectionGeneratorAgent(client, deployment)            
+            self.card_generator = CardGeneratorAgent(client, deployment)            
+            logging.info("All sub-agents initialized successfully.")        
+        except Exception as e:            
+            logging.error(f"Failed to initialize one or more sub-agents: {e}", exc_info=True)            
+            # Depending on requirements, you might want to raise the error            
+            # or allow the planner to work with potentially missing agents.            
             raise RuntimeError("DialoguePlanner failed to initialize sub-agents.") from e
 
     async def _determine_intent_and_entities(self, user_input: str, current_plan: Optional[dict], chat_history: List[str]) -> Dict[str, Any]:
@@ -213,8 +211,9 @@ Craft a brief, helpful, and conversational reply to the user (1-3 sentences).
                 max_tokens=150
             )
              reply = response.choices[0].message.content.strip()
-             # Basic cleanup
-             reply = reply.replace("\"", "")
+             # Basic cleanup - only remove quotes at the beginning and end if they wrap the entire message
+             if reply.startswith('"') and reply.endswith('"') and reply.count('"') == 2:
+                 reply = reply[1:-1]
              return reply
         except Exception as e:
             logging.error(f"Error generating AI reply: {e}", exc_info=True)

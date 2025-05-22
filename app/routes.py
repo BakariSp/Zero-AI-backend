@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from datetime import date
 
 from app.db import get_db
-from app.auth.jwt import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from app.models import User
 from app.setup import get_user_remaining_resources, initialize_user_daily_usage
 
@@ -12,7 +12,7 @@ router = APIRouter()
 @router.get("/users/me/daily-usage", response_model=dict)
 def get_my_daily_usage(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the current user's daily usage limits and remaining resources

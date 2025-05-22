@@ -2,14 +2,14 @@ import logging
 import asyncio
 import json
 import re
-from typing import List, Dict, Any
-from openai import AzureOpenAI # Or AsyncOpenAI if used
+from typing import List, Dict, Any, Union
+from openai import AzureOpenAI
 
 # Assuming BaseAgent and client setup might be shared or passed in
 # For simplicity here, let's assume client is passed or configured globally/via DI
 
 class PathPlannerAgent:
-    def __init__(self, client: AzureOpenAI, deployment: str):
+    def __init__(self, client: Union[AzureOpenAI, Any], deployment: str):
          # Simplified init - real app might use dependency injection
          self.client = client
          self.deployment = deployment
@@ -41,6 +41,25 @@ class PathPlannerAgent:
         logging.error(f"Could not extract valid JSON from response content: {content}")
         raise ValueError("AI response did not contain valid JSON.")
 
+    async def _make_completion_request(self, messages: List[Dict], **kwargs):
+        """
+        Make a completion request using either AzureOpenAI or ZhipuAI client.
+        This method abstracts the difference between different client types.
+        """
+        try:
+            # Use asyncio.to_thread for blocking SDK calls if using async FastAPI
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                messages=messages,
+                temperature=kwargs.get("temperature", 0.6),
+                max_tokens=kwargs.get("max_tokens", 3500),
+                model=self.deployment,
+                response_format=kwargs.get("response_format", {"type": "json_object"})
+            )
+            return response
+        except Exception as e:
+            logging.error(f"Error in completion request: {e}", exc_info=True)
+            raise
 
     # Adapted from LearningPathPlannerAgent.generate_learning_path in ai_generator.py
     # See: app/services/ai_generator.py (startLine: 130, endLine: 226)
@@ -108,16 +127,13 @@ class PathPlannerAgent:
         """
         logging.debug(f"Generating learning path with prompt:\n{prompt}")
         try:
-            # Use asyncio.to_thread for blocking SDK calls if using async FastAPI
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
+            response = await self._make_completion_request(
                 messages=[
                     {"role": "system", "content": "You are an expert curriculum designer who creates detailed learning paths in JSON format."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.6,
-                max_tokens=3500, # Adjust as needed
-                model=self.deployment,
+                max_tokens=3500,
                 response_format={"type": "json_object"}
             )
             content = response.choices[0].message.content.strip()

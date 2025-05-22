@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import date, datetime, timedelta
 
 from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from app.models import User
 
 from . import schemas, crud
@@ -23,7 +23,7 @@ def get_db():
 @router.get("/me", response_model=schemas.UserDailyUsageResponse)
 async def get_my_daily_usage(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the current user's daily usage for today.
@@ -38,7 +38,7 @@ async def increment_resource_usage(
     resource_type: str,
     count: int = 1,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Increment the usage count for a specific resource (paths or cards).
@@ -75,7 +75,7 @@ async def get_usage_history(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the user's daily usage history for a date range.
@@ -102,7 +102,7 @@ async def update_user_daily_limits(
     user_id: int,
     limits: schemas.UserDailyUsageUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Update a user's daily usage limits.

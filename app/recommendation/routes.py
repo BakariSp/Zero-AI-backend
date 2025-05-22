@@ -30,7 +30,7 @@ from app.recommendation.crud import (
     get_recommended_cards, get_interest_learning_paths, get_random_learning_paths
 )
 from app.services.learning_path_planner import LearningPathPlannerService
-from app.auth.jwt import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from app.learning_paths.crud import assign_learning_path_to_user
 from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation, schedule_structured_learning_path_generation, get_task_status
 from app.setup import increment_user_resource_usage, get_user_remaining_resources
@@ -84,7 +84,7 @@ async def get_personalized_recommendations(
     difficulty_level: str = "intermediate",
     user_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get personalized recommendations based on user interests:
@@ -159,7 +159,7 @@ async def generate_and_save_learning_path(
     background_tasks: BackgroundTasks,
     request: LearningPathRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Generate a complete learning path with courses, sections, and cards,
@@ -233,7 +233,7 @@ async def generate_and_save_learning_path(
 @router.get("/tasks/{task_id}/status", response_model=EnhancedTaskStatus)
 async def get_task_status_endpoint(
     task_id: str,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the status of a background task.
@@ -267,7 +267,7 @@ async def generate_cards_for_learning_path(
     learning_path_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Generate cards for an existing learning path
@@ -374,7 +374,7 @@ async def generate_learning_path_from_chat(
     request_body: ChatPromptRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Accepts a chat prompt and schedules a background task
@@ -412,7 +412,7 @@ async def create_learning_path_from_structure(
     request: LearningPathStructureRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Creates a learning path, courses, and sections from a predefined structure,
@@ -465,7 +465,7 @@ class InterestPathRequest(BaseModel):
 async def get_interest_learning_path_recommendations(
     request: InterestPathRequest,
     db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(get_current_active_user)
+    current_user: Optional[User] = Depends(get_current_active_user_unified)
 ):
     """
     Get simplified learning path recommendations based on interests with support for refreshing results.

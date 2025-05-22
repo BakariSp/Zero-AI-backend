@@ -113,25 +113,14 @@ log.info(f"- Same site: lax")
 log.info(f"- HTTPS only: {os.getenv('ENVIRONMENT', 'development').lower() == 'production'}")
 log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")
 
-# Configure CORS - should be early in the middleware stack
+# Configure CORS - use a simpler configuration that allows all headers and methods
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,  # Use the specific origins defined above
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Specify allowed methods
-    allow_headers=[
-        "Content-Type", 
-        "Authorization", 
-        "Accept", 
-        "X-Requested-With", 
-        "Origin", 
-        "Access-Control-Request-Method", 
-        "Access-Control-Request-Headers",
-        "X-CSRF-Token",
-        "X-MS-CLIENT-PRINCIPAL",
-        "X-Supabase-User"  # Add this header for Supabase user data
-    ],
-    expose_headers=["Content-Type", "Authorization"],  # Expose specific headers
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["Content-Type", "Authorization"],
     max_age=86400,  # Cache preflight response for 24 hours
 )
 

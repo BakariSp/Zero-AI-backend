@@ -105,8 +105,8 @@ def update_user(db: Session, user_id: int, user_data: Dict[str, Any]) -> User:
             import json
             interests_json = json.dumps(interests)
             
-            # Use PostgreSQL's specific JSON update syntax
-            sql = text("UPDATE users SET interests = :interests::jsonb WHERE id = :id")
+            # Use PostgreSQL's specific JSON update syntax with proper parameter casting
+            sql = text("UPDATE users SET interests = CAST(:interests AS jsonb) WHERE id = :id")
             db.execute(sql, {"interests": interests_json, "id": user_id})
         
         # Commit direct SQL changes
