@@ -15,51 +15,25 @@ from pydantic import BaseModel
 from typing import List
 from app.utils.url_validator import get_valid_resources  # Import the URL validator
 from datetime import datetime
+from app.utils import get_ai_client, get_model_deployment
 
 # Load environment variables
 load_dotenv()
 
-# Configure Azure OpenAI client
-endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-subscription_key = os.getenv("AZURE_OPENAI_API_KEY")
-api_version = "2024-12-01-preview"
-deployment = "gpt-4o"  # or your specific deployment name
+# --- Initialize AI Clients with abstraction layer ---
+# Get general purpose client and model deployment
+general_client = get_ai_client()
+GENERAL_DEPLOYMENT = get_model_deployment(is_card_model=False)
 
-client = AzureOpenAI(
-    api_version=api_version,
-    azure_endpoint=endpoint,
-    api_key=subscription_key,
-)
-
-# --- General Azure OpenAI Configuration ---
-GENERAL_API_KEY = os.getenv("AZURE_OPENAI_KEY")
-GENERAL_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-GENERAL_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") # Deployment for general tasks like path planning
-GENERAL_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01") # Or your preferred general API version
-
-general_client = AzureOpenAI(
-    api_version=GENERAL_API_VERSION,
-    azure_endpoint=GENERAL_ENDPOINT,
-    api_key=GENERAL_API_KEY
-)
-
-# --- Card Generation Fine-Tuned Model Configuration ---
-CARD_API_KEY = os.getenv("CARD_MODEL_AZURE_OPENAI_KEY", GENERAL_API_KEY) # Fallback to general key if not set
-CARD_ENDPOINT = os.getenv("CARD_MODEL_AZURE_OPENAI_ENDPOINT", GENERAL_ENDPOINT) # Fallback to general endpoint
-CARD_DEPLOYMENT = os.getenv("CARD_MODEL_AZURE_DEPLOYMENT_NAME") # Deployment for fine-tuned card generation
-CARD_API_VERSION = os.getenv("CARD_MODEL_AZURE_API_VERSION", GENERAL_API_VERSION) # Add this missing line
-
-card_client = AzureOpenAI(
-    api_version=CARD_API_VERSION,
-    azure_endpoint=CARD_ENDPOINT,
-    api_key=CARD_API_KEY
-)
+# Get card-specific client and model deployment
+card_client = get_ai_client() 
+CARD_DEPLOYMENT = get_model_deployment(is_card_model=True)
 
 class BaseAgent:
     """Base class for all AI agents"""
-    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+    def __init__(self, client: Optional[Any], deployment: Optional[str]):
         if client is None or deployment is None:
-             raise ValueError(f"{self.__class__.__name__} requires a valid AzureOpenAI client and deployment name.")
+             raise ValueError(f"{self.__class__.__name__} requires a valid AI client and deployment name.")
         self.client = client
         self.deployment = deployment
         logging.info(f"Initialized {self.__class__.__name__} with deployment '{self.deployment}'")
@@ -67,7 +41,7 @@ class BaseAgent:
     def _extract_json_from_response(self, content: str) -> Any:
         """Extracts JSON object or list from potentially messy AI response."""
         original_content = content # Keep original for logging if needed
-        logging.debug(f"Attempting to extract JSON from: {content[:500]}...") # Log input
+        logging.debug(f"Attempting to extract JSON from: {content[:500]}...")
 
         try:
             # Try finding JSON within ```json ... ``` blocks
@@ -377,7 +351,7 @@ class LearningPathPlannerAgent(BaseAgent):
 class CardGeneratorAgent(BaseAgent):
     """Agent responsible for generating detailed card content from keywords"""
     
-    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+    def __init__(self, client: Optional[Any], deployment: Optional[str]):
         super().__init__(client, deployment)
         # Keep a cache of recently generated cards to avoid repetition
         self._recent_card_cache = {}
@@ -860,7 +834,7 @@ class ParallelCardGeneratorManager:
 class LearningAssistantAgent(BaseAgent):
     """Agent responsible for answering user questions and generating related cards during learning"""
     
-    def __init__(self, client: Optional[AzureOpenAI], deployment: Optional[str]):
+    def __init__(self, client: Optional[Any], deployment: Optional[str]):
         super().__init__(client, deployment)
         # Cache of previously generated card keywords for deduplication
         self._user_card_history = {}
@@ -1387,7 +1361,7 @@ def get_learning_path_planner_agent() -> LearningPathPlannerAgent:
 async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
     """Extract learning goals from a chat prompt"""
     try:
-        response = client.chat.completions.create(
+        response = general_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": "You are an expert at understanding learning goals and converting them into structured learning parameters."},
                 {"role": "user", "content": f"""
@@ -1400,7 +1374,7 @@ async def extract_learning_goals(prompt: str) -> Tuple[List[str], str, int]:
             ],
             temperature=0.5, # Slightly lower temperature for more deterministic extraction
             max_tokens=200, # Reduced tokens as the output is small
-            model=deployment,
+            model=GENERAL_DEPLOYMENT,
             response_format={"type": "json_object"} # Enforce JSON output if model supports it
         )
 

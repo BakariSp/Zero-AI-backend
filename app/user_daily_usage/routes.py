@@ -20,7 +20,7 @@ def get_db():
     finally:
         db.close()
 
-@router.get("/daily-usage/me", response_model=schemas.UserDailyUsageResponse)
+@router.get("/me", response_model=schemas.UserDailyUsageResponse)
 async def get_my_daily_usage(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
@@ -33,7 +33,7 @@ async def get_my_daily_usage(
     usage = crud.reset_daily_usage_if_needed(db, current_user.id)
     return usage
 
-@router.post("/daily-usage/increment", response_model=schemas.UserDailyUsageResponse)
+@router.post("/increment", response_model=schemas.UserDailyUsageResponse)
 async def increment_resource_usage(
     resource_type: str,
     count: int = 1,
@@ -70,7 +70,7 @@ async def increment_resource_usage(
     
     return usage
 
-@router.get("/daily-usage/history", response_model=List[schemas.UserDailyUsageResponse])
+@router.get("/history", response_model=List[schemas.UserDailyUsageResponse])
 async def get_usage_history(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
@@ -97,7 +97,7 @@ async def get_usage_history(
     return history
 
 # Admin-only endpoint to manage user limits
-@router.put("/daily-usage/{user_id}", response_model=schemas.UserDailyUsageResponse)
+@router.put("/{user_id}", response_model=schemas.UserDailyUsageResponse)
 async def update_user_daily_limits(
     user_id: int,
     limits: schemas.UserDailyUsageUpdate,

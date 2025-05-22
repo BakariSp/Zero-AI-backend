@@ -1,52 +1,60 @@
 import os
-import mysql.connector
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
-import pymysql
 import logging
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, declarative_base
+import urllib.parse
+from dotenv import load_dotenv
+
+# Load environment variables from .env file with override
+load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# EXPLICITLY set the username without the server suffix
-DB_USER = "fmqfmvlobx"  # Hardcoded without server suffix
-DB_PASSWORD = os.getenv("DB_PASSWORD", "zero-ai0430")
-DB_HOST = os.getenv("DB_HOST", "zero-ai-server.mysql.database.azure.com")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_NAME = os.getenv("DB_NAME", "zero-ai-database")
-SSL_CA = os.path.abspath(os.getenv("SSL_CA", "DigiCertGlobalRootCA.crt.pem"))
+# Get database connection parameters from environment variables
+DB_USER = os.getenv("DB_USER", "postgres.ecwdxlkvqiqyjffcovby")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "usvWwFHsvcAEymNQ")
+DB_HOST = os.getenv("DB_HOST", "aws-0-ap-southeast-1.pooler.supabase.com")
+DB_PORT = int(os.getenv("DB_PORT", "6543"))
+DB_NAME = os.getenv("DB_NAME", "postgres")
 
-# Create MySQL connection - using the format that worked in cloudshell
-def get_mysql_connection():
-    return mysql.connector.connect(
-        user=DB_USER,
-        password=DB_PASSWORD,
-        host=DB_HOST,
-        port=DB_PORT,
-        database=DB_NAME,
-        ssl_ca=SSL_CA,
-        ssl_disabled=False
-    )
+# URL encode the password to handle special characters
+ENCODED_PASSWORD = urllib.parse.quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
 
-# For SQLAlchemy, create a connection string that works with the same parameters
-# Add connection pooling and timeout settings to prevent "MySQL server has gone away" errors
+# IMPORTANT: Force PostgreSQL connection - ignore any DATABASE_URL from env vars
+# that might be pointing to MySQL
+DATABASE_URL = f"postgresql://{DB_USER}:{ENCODED_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# Log connection info (without password)
+masked_url = DATABASE_URL.replace(DB_PASSWORD, "*****") if DB_PASSWORD else DATABASE_URL
+logger.info(f"Connecting to PostgreSQL database using URL: {masked_url}")
+
+# Extra check to ensure we're using PostgreSQL dialect
+if "postgresql://" not in DATABASE_URL:
+    logger.error(f"ERROR: Database URL does not use PostgreSQL dialect: {DATABASE_URL.split('://')[0]}")
+    logger.error("Forcing PostgreSQL dialect to ensure proper connection")
+    # Extract components and rebuild with postgresql:// prefix
+    if "://" in DATABASE_URL:
+        _, connection_details = DATABASE_URL.split("://", 1)
+        DATABASE_URL = f"postgresql://{connection_details}"
+        logger.info(f"Updated DATABASE_URL to: {DATABASE_URL.replace(DB_PASSWORD, '*****') if DB_PASSWORD else DATABASE_URL}")
+
+# Create SQLAlchemy engine for PostgreSQL
 engine = create_engine(
-    f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}",
-    connect_args={
-        "ssl": {"ca": SSL_CA},
-        # Add connection timeouts
-        "connect_timeout": 60,  # 60 seconds connection timeout
-    },
-    # Add pool settings
-    pool_size=10,  # Number of connections to keep open
-    max_overflow=20,  # Max number of connections to create when pool is full
-    pool_timeout=30,  # Timeout for getting a connection from the pool
-    pool_recycle=3600,  # Recycle connections after 1 hour to avoid stale connections
-    pool_pre_ping=True  # Test connections with a ping before using them
+    DATABASE_URL,
+    # Add connection pooling settings appropriate for a connection pooler
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=3600,
+    pool_pre_ping=True
 )
 
-logger.info("SQLAlchemy engine created with connection pooling and timeout settings")
+# Log the actual driver being used
+logger.info(f"SQLAlchemy engine dialect: {engine.dialect.name}")
+logger.info(f"SQLAlchemy driver: {engine.dialect.driver}")
+logger.info("SQLAlchemy engine created with connection pooling for PostgreSQL")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -78,21 +86,53 @@ def init_db():
 # Add a function to test the connection
 def test_connection():
     try:
-        # Try direct MySQL connector first
-        conn = get_mysql_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        print(f"MySQL Connector connection successful: {result}")
-        
-        # Then try SQLAlchemy
+        # Test SQLAlchemy connection
         with engine.connect() as connection:
-            result = connection.execute("SELECT 1").scalar()
-            print(f"SQLAlchemy connection successful: {result}")
+            result = connection.execute(text("SELECT 1")).scalar()
+            print(f"PostgreSQL connection successful: {result}")
         
         return True
     except Exception as e:
         print(f"Connection test failed: {e}")
+        return False
+
+# Add a function to reset the connection pool
+def reset_db_pool():
+    """
+    Dispose of the current connection pool and create a new one.
+    This can help fix issues with stale connections.
+    """
+    global engine
+    try:
+        # Log current pool status
+        logger.info(f"Current connection pool size: {engine.pool.size()}")
+        logger.info(f"Current connection overflow: {engine.pool.overflow()}")
+        
+        # Dispose of all connections in the pool
+        engine.dispose()
+        logger.info("Connection pool disposed")
+        
+        # Create a new engine with the same settings
+        engine = create_engine(
+            DATABASE_URL,
+            pool_size=10,
+            max_overflow=20,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True
+        )
+        logger.info("New connection pool created")
+        
+        # Update the sessionmaker to use the new engine
+        global SessionLocal
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        
+        # Test the new connection
+        with engine.connect() as connection:
+            result = connection.execute(text("SELECT 1")).scalar()
+            logger.info(f"New connection test successful: {result}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error resetting connection pool: {e}")
         return False

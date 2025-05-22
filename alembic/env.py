@@ -1,10 +1,14 @@
 from logging.config import fileConfig
 import os
+from dotenv import load_dotenv
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
+
+# Load environment variables from .env file
+load_dotenv(override=True)
 
 # 导入您的模型元数据
 from app.models import Base
@@ -61,22 +65,14 @@ def run_migrations_online() -> None:
     In this scenario we need to create an Engine
     and associate a connection with the context.
     """
-    # 使用SSL连接
-    ssl_args = {
-        "ssl": {
-            "ca": os.path.join(os.path.dirname(os.path.dirname(__file__)), "DigiCertGlobalRootCA.crt.pem")
-        }
-    }
-    
-    # 从配置中获取URL
+    # Get URL from config
     url = config.get_main_option("sqlalchemy.url")
     
-    # 创建引擎时添加SSL参数
+    # Create engine without MySQL-specific SSL args
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
-        connect_args=ssl_args
     )
 
     with connectable.connect() as connection:

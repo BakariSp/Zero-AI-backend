@@ -1,5 +1,6 @@
 import enum
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text, Enum as DBEnum, Float
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
 from app.db import Base
@@ -41,6 +42,9 @@ class UserTask(Base):
     progress = Column(Float, default=0.0)
     message = Column(Text, nullable=True)
     error_details = Column(Text, nullable=True)
+    
+    # Add a column for task metadata - renamed from 'metadata' which is reserved
+    task_metadata = Column(JSONB, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

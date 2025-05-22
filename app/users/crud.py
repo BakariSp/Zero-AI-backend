@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime, timedelta
+from sqlalchemy import text
 
 from app.models import User, PromotionCodeUsage, UserTermsAcceptance
 from app.users.schemas import UserCreate, UserUpdate, UserInterests
@@ -64,18 +65,65 @@ def create_user(db: Session, user: UserCreate, oauth_provider: str = None, oauth
     return db_user
 
 def update_user(db: Session, user_id: int, user_data: Dict[str, Any]) -> User:
+    logging.info(f"Updating user {user_id} with data: {user_data}")
+    
     db_user = get_user(db, user_id)
     if not db_user:
+        logging.error(f"User not found with ID: {user_id}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
     
-    for key, value in user_data.items():
-        setattr(db_user, key, value)
+    # Try two approaches to ensure updates are persisted
     
-    db.commit()
-    db.refresh(db_user)
+    # Method 1: Using ORM attribute setting
+    try:
+        for key, value in user_data.items():
+            setattr(db_user, key, value)
+        
+        db.commit()
+        logging.info(f"User {user_id} updated successfully via ORM")
+    except Exception as e:
+        logging.error(f"Error during ORM update for user {user_id}: {str(e)}")
+        db.rollback()
+        # Continue to try the direct SQL approach
+    
+    # Method 2: Direct SQL update for certain fields
+    try:
+        # For text fields like username
+        if 'username' in user_data:
+            username = user_data['username']
+            sql = text("UPDATE users SET username = :username WHERE id = :id")
+            db.execute(sql, {"username": username, "id": user_id})
+            
+        # For JSON fields like interests
+        if 'interests' in user_data:
+            interests = user_data['interests']
+            
+            # For PostgreSQL, we need to convert to JSON
+            import json
+            interests_json = json.dumps(interests)
+            
+            # Use PostgreSQL's specific JSON update syntax
+            sql = text("UPDATE users SET interests = :interests::jsonb WHERE id = :id")
+            db.execute(sql, {"interests": interests_json, "id": user_id})
+        
+        # Commit direct SQL changes
+        db.commit()
+        logging.info(f"User {user_id} updated successfully via direct SQL")
+    except Exception as e:
+        logging.error(f"Error during direct SQL update for user {user_id}: {str(e)}")
+        db.rollback()
+    
+    # Refresh the user object to reflect all changes
+    try:
+        db.refresh(db_user)
+    except Exception as e:
+        logging.error(f"Error refreshing user object: {str(e)}")
+        # Try to get a fresh copy of the user
+        db_user = get_user(db, user_id)
+    
     return db_user
 
 def delete_user(db: Session, user_id: int) -> bool:

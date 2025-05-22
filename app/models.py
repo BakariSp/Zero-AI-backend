@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Table, JSON, Float, Date
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, Boolean, Table, Float, Date
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -42,7 +43,7 @@ class User(Base):
     # items = relationship("Item", back_populates="owner") 
     
     # New fields for interests and learning paths
-    interests = Column(JSON, nullable=True)  # Store interests as JSON array
+    interests = Column(JSONB, nullable=True)  # Store interests as JSONB array for better performance
     
     # Relationships
     learning_paths = relationship("UserLearningPath", back_populates="user")
@@ -169,9 +170,9 @@ class Card(Base):
     answer = Column(Text, nullable=False)
     explanation = Column(Text, nullable=True)
     difficulty = Column(String(50), nullable=True)
-    resources = Column(MutableList.as_mutable(JSON), default=lambda: [])  # Use lambda to ensure a new list each time
+    resources = Column(MutableList.as_mutable(JSONB), default=lambda: [])  # Changed to JSONB for better performance
     level = Column(String(20), nullable=True)
-    tags = Column(JSON, nullable=True)
+    tags = Column(JSONB, nullable=True)  # Changed to JSONB for better performance
     created_by = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -214,7 +215,7 @@ class DailyLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     log_date = Column(DateTime, default=func.now())
-    completed_sections = Column(JSON, nullable=True)  # Store section IDs as JSON array
+    completed_sections = Column(JSONB, nullable=True)  # Changed to JSONB for better performance
     notes = Column(Text, nullable=True)
     study_time_minutes = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=func.now())
@@ -231,7 +232,7 @@ class Achievement(Base):
     description = Column(Text)
     badge_image = Column(String(255), nullable=True)
     achievement_type = Column(String(50))  # e.g., "streak", "completion", "milestone"
-    criteria = Column(JSON)  # Store criteria as JSON
+    criteria = Column(JSONB)  # Changed to JSONB for better performance
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -298,7 +299,7 @@ class UserDailyUsage(Base):
     """
     __tablename__ = "user_daily_usage"
     
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     usage_date = Column(Date, server_default=func.current_date(), nullable=False, index=True)
     paths_generated = Column(Integer, server_default='0', nullable=False)
@@ -311,10 +312,8 @@ class UserDailyUsage(Base):
     # Relationship to User
     user = relationship("User", back_populates="daily_usage")
     
-    __table_args__ = (
-        # Ensure a user can only have one record per day
-        {'sqlite_autoincrement': True},
-    )
+    # Remove sqlite-specific config
+    __table_args__ = ()
     
     def __repr__(self):
         return f"<UserDailyUsage(id={self.id}, user_id={self.user_id}, date='{self.usage_date}', paths={self.paths_generated}/{self.paths_daily_limit}, cards={self.cards_generated}/{self.cards_daily_limit})>"
@@ -363,12 +362,12 @@ class InterestLearningPathRecommendation(Base):
     """
     __tablename__ = "interest_learning_path_recommendation"
     
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, index=True)
     interest_id = Column(String(50), nullable=False, index=True)  # e.g., 'tech_basics'
     learning_path_id = Column(Integer, ForeignKey("learning_paths.id", ondelete="CASCADE"), nullable=False, index=True)
     score = Column(Float, nullable=True)  # Recommendation strength (0-1)
     priority = Column(Integer, nullable=True)  # For ordering display (lower = higher)
-    tags = Column(JSON, nullable=True)  # Metadata like ['beginner', 'fun']
+    tags = Column(JSONB, nullable=True)  # Changed to JSONB for better performance
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
     

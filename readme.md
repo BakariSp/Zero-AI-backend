@@ -70,3 +70,72 @@ Two testing scripts are provided to help validate and test the URL validation an
 
 For detailed instructions on using these scripts, see [Testing Resources](docs/testing_resources.md).
 
+# Zero-AI Backend User Cards Fix
+
+## Problem Description
+
+The application was encountering 404 errors when trying to access user cards with routes like:
+```
+"PUT /api/users/me/cards/2787 HTTP/1.1" 404 Not Found
+```
+
+The issue was that when cards were generated (either through learning paths or AI chat), they were being created in the database but **not being associated with users in the `user_cards` table**. This association is crucial for tracking user progress and personalizing the learning experience.
+
+## Solution
+
+We've implemented both a one-time fix script and permanent changes to the codebase:
+
+1. **Fix Script (`fix_user_cards.py`)** - A utility script that finds all cards that are part of a user's learning paths but not in their user_cards table, and creates the missing associations.
+
+2. **Code Changes** - We've updated the following files to ensure cards are automatically associated with users when created:
+   - `app/services/background_tasks.py`
+   - `app/services/learning_path_planner.py`
+
+## Running the Fix Script
+
+To fix existing data in your database:
+
+```bash
+# Fix for all users
+python fix_user_cards.py
+
+# Fix for a specific user
+python fix_user_cards.py --user-id 123
+```
+
+The script will:
+1. Identify missing user-card associations
+2. Show you how many cards need to be fixed
+3. Ask for confirmation before making changes
+4. Add the missing entries to the user_cards table
+5. Report the results
+
+## Code Changes Made
+
+We updated the following functions to automatically associate cards with users:
+
+1. Added `user_id` parameter to card generation functions
+2. Added code to call `save_card_for_user()` after creating each card
+3. Ensured the functions properly handle any errors that might occur during the association
+
+## Testing the Fix
+
+After applying these changes, you should:
+
+1. Run the fix script to repair existing data
+2. Create a new learning path and verify cards are properly linked to the user
+3. Try accessing user cards via the API to confirm they return 200 OK instead of 404
+
+## Monitoring
+
+Look for the following log messages to confirm cards are being properly associated with users:
+```
+Associated card {card_id} with user {user_id} in user_cards table
+```
+
+If you see error messages like:
+```
+Failed to associate card {card_id} with user {user_id}: {error}
+```
+then there might be an issue with the database or permissions.
+

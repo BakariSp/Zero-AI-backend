@@ -1,15 +1,16 @@
 from fastapi import APIRouter, Request, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from app.db import SessionLocal, get_mysql_connection, test_connection
+from app.db import SessionLocal, test_connection
 from app.utils import get_azure_openai_client
 import os
 from datetime import datetime
 import time
+import logging
 
 router = APIRouter()
 
-# 数据库依赖
+# Database dependency
 def get_db():
     db = SessionLocal()
     try:
@@ -43,7 +44,7 @@ def read_current_user(request: Request):
 @router.get("/test-db-connection")
 async def test_db_connection():
     try:
-        # First try using the direct mysql.connector approach
+        # Test the connection
         connection_result = test_connection()
         
         if connection_result:
@@ -53,8 +54,8 @@ async def test_db_connection():
                 "message": "Database connection successful",
                 "data": {
                     "test_value": 1,
-                    "db_type": "MySQL",
-                    "connection_info": "Connected to Azure MySQL database",
+                    "db_type": "PostgreSQL",
+                    "connection_info": "Connected to Supabase PostgreSQL database",
                     "connection_method": "Direct connection test successful"
                 },
                 "timestamp": datetime.now().isoformat()
@@ -72,8 +73,8 @@ async def test_db_connection():
                 "message": "Database connection successful",
                 "data": {
                     "test_value": result[0],
-                    "db_type": "MySQL",
-                    "connection_info": "Connected to Azure MySQL database",
+                    "db_type": "PostgreSQL",
+                    "connection_info": "Connected to Supabase PostgreSQL database",
                     "connection_method": "SQLAlchemy connection successful"
                 },
                 "timestamp": datetime.now().isoformat()
@@ -125,6 +126,87 @@ async def test_openai_connection():
             "status": "error",
             "code": 500,
             "message": f"OpenAI connection failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@router.get("/test-ai")
+async def test_ai_connection():
+    """Test the currently configured AI service (Azure OpenAI or Zhipu AI)"""
+    try:
+        from app.utils import get_ai_client, get_model_deployment
+        import traceback
+        
+        # Determine which AI provider is being used
+        provider = "Zhipu AI" if os.getenv("USE_ZHIPU_AI", "false").lower() == "true" else "Azure OpenAI"
+        logging.info(f"Testing AI connection using provider: {provider}")
+        
+        # Get client and model
+        client = get_ai_client()
+        model = get_model_deployment()
+        logging.info(f"Using model: {model}")
+        
+        # Make test request
+        start_time = time.time()
+        try:
+            response = client.chat.completions.create(
+                messages=[{"role": "user", "content": "Hello, are you working?"}],
+                max_tokens=50,
+                model=model
+            )
+            elapsed_time = time.time() - start_time
+            
+            # Log response for debugging
+            if provider == "Zhipu AI":
+                logging.info(f"Zhipu AI response: {response}")
+                logging.info(f"Response type: {type(response)}")
+                logging.info(f"Has choices: {hasattr(response, 'choices')}")
+                if hasattr(response, 'choices') and len(response.choices) > 0:
+                    logging.info(f"First choice: {response.choices[0]}")
+            
+            return {
+                "status": "success",
+                "code": 200,
+                "message": f"{provider} connection successful",
+                "data": {
+                    "provider": provider,
+                    "response": response.choices[0].message.content,
+                    "model": model,
+                    "response_time_seconds": round(elapsed_time, 2)
+                },
+                "timestamp": datetime.now().isoformat()
+            }
+        except AttributeError as e:
+            # Handle specific structural errors that might occur with Zhipu AI
+            error_msg = f"Attribute error when accessing response: {str(e)}"
+            logging.error(error_msg)
+            logging.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "code": 500,
+                "message": f"{provider} connection failed: {error_msg}",
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            # Handle general request errors
+            error_msg = f"Error making request to {provider}: {str(e)}"
+            logging.error(error_msg)
+            logging.error(traceback.format_exc())
+            return {
+                "status": "error",
+                "code": 500,
+                "message": error_msg,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        provider = "Zhipu AI" if os.getenv("USE_ZHIPU_AI", "false").lower() == "true" else "Azure OpenAI"
+        error_msg = f"{provider} client initialization failed: {str(e)}"
+        logging.error(error_msg)
+        logging.error(traceback.format_exc())
+        return {
+            "status": "error",
+            "code": 500,
+            "message": error_msg,
             "timestamp": datetime.now().isoformat()
         }
 

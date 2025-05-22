@@ -3,9 +3,11 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth import get_user_from_request, get_current_active_user
+from app.auth.middleware import SupabaseAuthMiddleware
 from app.users.routes import router as users_router
 from app.auth.jwt import router as auth_router
 from app.auth.guest import router as guest_router
+from app.auth.supabase import router as supabase_router
 from app.cards.routes import router as cards_router
 from app.db import init_db
 from starlette.middleware.sessions import SessionMiddleware
@@ -29,7 +31,6 @@ from app.backend_tasks.routes import router as backend_tasks_router
 from app.user_tasks.routes import router as user_tasks_router
 from app.user_daily_usage.routes import router as user_daily_usage_router
 from app.planner.ai import router as planner_router
-# from app.learning_assistant.routes import router as learning_assistant_router  # Module doesn't exist
 from app.routers.learning_assistant import router as learning_assistant_router
 from app.routes import router as app_routes
 from app.scheduler import start_scheduler
@@ -47,6 +48,8 @@ load_dotenv()
 print("Environment variables loaded:")
 print(f"MICROSOFT_CLIENT_ID: {'Yes' if os.getenv('MICROSOFT_CLIENT_ID') else 'No'}")
 print(f"GOOGLE_CLIENT_ID: {'Yes' if os.getenv('GOOGLE_CLIENT_ID') else 'No'}")
+print(f"SUPABASE_URL: {'Yes' if os.getenv('SUPABASE_URL') else 'No'}")
+print(f"SUPABASE_KEY: {'Yes' if os.getenv('SUPABASE_KEY') else 'No'}")
 
 app = FastAPI(title="Zero AI API")
 
@@ -75,9 +78,18 @@ async def options_middleware(request: Request, call_next):
         response = Response(status_code=200)
         
         # Set basic CORS headers
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "*"
+        origin = request.headers.get("Origin")
+        # Check if the origin is in our allowed origins
+        if origin in origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+        else:
+            # Fallback to the frontend URL
+            response.headers["Access-Control-Allow-Origin"] = frontend_url
+            
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With, Access-Control-Request-Method, Access-Control-Request-Headers, X-CSRF-Token, X-MS-CLIENT-PRINCIPAL, X-Supabase-User"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "86400"  # 24 hours
         
         return response
         
@@ -104,9 +116,9 @@ log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")
 # Configure CORS - should be early in the middleware stack
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For debugging, allow all origins
+    allow_origins=origins,  # Use the specific origins defined above
     allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],  # Specify allowed methods
     allow_headers=[
         "Content-Type", 
         "Authorization", 
@@ -117,11 +129,40 @@ app.add_middleware(
         "Access-Control-Request-Headers",
         "X-CSRF-Token",
         "X-MS-CLIENT-PRINCIPAL",
-        "*"  # Allow all headers for debugging
+        "X-Supabase-User"  # Add this header for Supabase user data
     ],
-    expose_headers=["*"],  # Expose all headers
+    expose_headers=["Content-Type", "Authorization"],  # Expose specific headers
     max_age=86400,  # Cache preflight response for 24 hours
 )
+
+# Add Supabase authentication middleware
+app.add_middleware(SupabaseAuthMiddleware)
+
+# Add a middleware to ensure CORS headers are set on all responses
+class EnsureCORSHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Continue with the regular request processing
+        response = await call_next(request)
+        
+        # Check if the response already has CORS headers
+        if "Access-Control-Allow-Origin" not in response.headers:
+            # Get origin from request
+            origin = request.headers.get("Origin")
+            
+            # Only set CORS headers if origin is present
+            if origin:
+                # Check if the origin is in our allowed origins
+                if origin in origins:
+                    response.headers["Access-Control-Allow-Origin"] = origin
+                else:
+                    # Fallback to the frontend URL if origin not in allowed list
+                    response.headers["Access-Control-Allow-Origin"] = frontend_url
+                    
+                response.headers["Access-Control-Allow-Credentials"] = "true"
+        
+        return response
+
+app.add_middleware(EnsureCORSHeadersMiddleware)
 
 # Security headers middleware for production
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -173,20 +214,68 @@ async def add_user_to_request(request: Request, call_next):
     auth_header = request.headers.get("Authorization")
     logging.info(f"Authorization header present: {auth_header is not None}")
     
-    user = get_user_from_request(request)
-    request.state.user = user
+    # IMPORTANT: Make sure we're using the correct path
+    # Add original path for routing checks
+    if not hasattr(request.state, "original_path"):
+        request.state.original_path = request.url.path
     
-    # Log if user was found through the middleware
-    if user:
-        logging.info(f"User identified through middleware: {user.get('userId', 'unknown')}")
+    # Note: The SupabaseAuthMiddleware will have already populated request.state.user if using Supabase
+    # Only try the legacy authentication if no user was found by Supabase
+    if not hasattr(request.state, "user") or request.state.user is None:
+        try:
+            user = get_user_from_request(request)
+            
+            # Only set user if we found one through legacy methods
+            if user:
+                request.state.user = user
+                logging.info(f"User identified through legacy middleware: {user.get('userId', 'unknown')}")
+            else:
+                logging.info("No user identified through legacy middleware")
+        except Exception as e:
+            logging.warning(f"Error during legacy authentication: {str(e)}")
+            # Don't set user if there was an error
+            pass
     else:
-        logging.info("No user identified through middleware, will try JWT auth")
+        # Check what type of user we got from Supabase middleware
+        if isinstance(request.state.user, dict):
+            logging.info(f"Request already has legacy user from Supabase middleware: {request.state.user.get('userId', 'unknown')}")
+        else:
+            logging.info(f"Request already has DB user from Supabase middleware: {request.state.user.id}")
+    
+    # For debugging, check the state of authentication before proceeding
+    if hasattr(request.state, "user") and request.state.user is not None:
+        if isinstance(request.state.user, dict):
+            logging.info(f"Request will proceed with legacy user: {request.state.user.get('userId', 'unknown')}")
+        else:
+            logging.info(f"Request will proceed with DB user: {request.state.user.id}")
+    else:
+        # Check if we have supabase_user but not user
+        if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+            logging.info(f"Request has supabase_user data but no user object. This might indicate a database sync issue.")
+        
+        logging.info(f"Request will proceed without authenticated user")
+    
+    # Log authentication state
+    logging.info(f"Authentication check for path: {request.url.path}")
+    logging.info(f"Authorization header present: {auth_header is not None}")
+    
+    if auth_header and auth_header.startswith("Bearer "):
+        logging.info(f"Successfully validated token for {request.url.path}")
     
     response = await call_next(request)
     
     # If unauthorized response, log the path for debugging
     if response.status_code == 401:
         logging.warning(f"Unauthorized access to path: {request.url.path}")
+        
+        # Add debug header for tracing
+        response.headers["X-Debug-Path"] = request.url.path
+        if hasattr(request.state, "user") and request.state.user is not None:
+            user_id = getattr(request.state.user, "id", "unknown") 
+            response.headers["X-Debug-User-Present"] = "true"
+            response.headers["X-Debug-User-ID"] = str(user_id)
+        else:
+            response.headers["X-Debug-User-Present"] = "false"
     
     return response
 
@@ -194,6 +283,7 @@ async def add_user_to_request(request: Request, call_next):
 app.include_router(users_router, prefix="/api", tags=["users"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
 app.include_router(guest_router, prefix="/api", tags=["guest"])
+app.include_router(supabase_router, prefix="/api/auth/supabase", tags=["supabase"])
 app.include_router(cards_router, prefix="/api", tags=["cards"])
 app.include_router(learning_paths_router, prefix="/api", tags=["learning_paths"])
 app.include_router(daily_logs_router, prefix="/api", tags=["daily_logs"])
@@ -201,56 +291,72 @@ app.include_router(achievements_router, prefix="/api", tags=["achievements"])
 app.include_router(courses_router, prefix="/api", tags=["courses"])
 app.include_router(sections_router, prefix="/api", tags=["sections"])
 app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_path_courses"])
-app.include_router(recommendation_router, prefix="/api", tags=["recommendations"])
-app.include_router(oauth_router, prefix="/oauth", tags=["oauth"])
-app.include_router(backend_tasks_router, prefix="/api", tags=["backend_tasks"])
-app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
-app.include_router(user_daily_usage_router, prefix="/api", tags=["user_daily_usage"])
-app.include_router(planner_router, prefix="/api/ai", tags=["AI Planner"])
-# app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])  # Module doesn't exist
-app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])
+app.include_router(recommendation_router, prefix="/api", tags=["recommendation"])
+app.include_router(oauth_router, prefix="/api/oauth", tags=["oauth"])
+app.include_router(backend_tasks_router, prefix="/api/backend-tasks", tags=["backend_tasks"])
+app.include_router(user_tasks_router, prefix="/api/user-tasks", tags=["user_tasks"])
+app.include_router(user_daily_usage_router, prefix="/api/daily-usage", tags=["user_daily_usage"])
+app.include_router(planner_router, prefix="/api/planner", tags=["planner"])
+app.include_router(learning_assistant_router, prefix="/api/learning-assistant", tags=["learning_assistant"])
 app.include_router(app_routes, prefix="/api", tags=["app"])
-# Initialize database on startup
+
+# Startup event - initialize database
 @app.on_event("startup")
 def startup_db_client():
     init_db()
-    log.info("Database initialized")
+    print("Database initialized")
     
-    # Start the scheduler to run background tasks
+    # Start the background scheduler
     try:
         start_scheduler()
-        log.info("Background task scheduler started")
+        print("Background scheduler started")
     except Exception as e:
-        log.error(f"Error starting scheduler: {str(e)}")
-    
-    # Log the origins allowed for CORS
-    log.info(f"CORS allowed origins: {origins}")
+        print(f"Warning: Could not start scheduler: {e}")
+        # Don't raise here, the app can still function without the scheduler
 
-# Custom JSON encoder for datetime objects
+# Custom JSON encoder for handling datetime
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
 
-# Set the custom encoder for FastAPI
-app.json_encoder = CustomJSONEncoder
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-
-# Add a global OPTIONS handler to handle all preflight requests
+# Add a global OPTIONS handler
 @app.options("/{path:path}")
-async def options_handler(path: str):
+async def options_handler(path: str, request: Request):
     """
-    Global handler for OPTIONS requests to any path.
-    This ensures we always return a 200 OK for OPTIONS preflight requests.
+    Global OPTIONS handler for CORS preflight requests.
+    This is a fallback in case an individual route doesn't have its own OPTIONS handler.
     """
-    log.info(f"Global OPTIONS handler called for path: /{path}")
-    return Response(status_code=200)
+    response = Response(status_code=200)
+    
+    # Get origin from request headers
+    origin = request.headers.get("Origin")
+    
+    # Only set CORS headers if origin is present
+    if origin:
+        # Check if the origin is in our allowed origins
+        if origin in origins:
+            response.headers["Access-Control-Allow-Origin"] = origin
+        else:
+            # Fallback to the frontend URL if origin not in allowed list
+            response.headers["Access-Control-Allow-Origin"] = frontend_url
+            
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With, Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Max-Age"] = "86400"  # 24 hours
+    
+    return response
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to Zero AI API"}
+    """Root endpoint for health check and basic information"""
+    return {
+        "name": "Zero AI API",
+        "version": "1.0.0",
+        "status": "running"
+    }
 
 # When running in production, use:
 # uvicorn main:app --host 0.0.0.0 --port $PORT

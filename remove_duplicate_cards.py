@@ -7,6 +7,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 from collections import defaultdict
+from dotenv import load_dotenv
+import urllib.parse
+
+# Load environment variables
+load_dotenv()
 
 # Set up logging
 logging.basicConfig(
@@ -18,17 +23,18 @@ logging.basicConfig(
 )
 
 def get_database_url():
-    """Get database URL from environment variables or use default"""
-    db_user = os.environ.get('DB_USER', 'root')
-    db_password = os.environ.get('DB_PASSWORD', 'root')
-    db_host = os.environ.get('DB_HOST', 'localhost')
-    db_port = os.environ.get('DB_PORT', '3306')
-    db_name = os.environ.get('DB_NAME', 'zerodb')
+    """Get database URL from environment variables or use default for PostgreSQL"""
+    db_user = os.environ.get('DB_USER', 'postgres.ecwdxlkvqiqyjffcovby')
+    db_password = os.environ.get('DB_PASSWORD', 'usvWwFHsvcAEymNQ')
+    db_host = os.environ.get('DB_HOST', 'aws-0-ap-southeast-1.pooler.supabase.com')
+    db_port = os.environ.get('DB_PORT', '6543')
+    db_name = os.environ.get('DB_NAME', 'postgres')
     
-    # Adding SSL parameters to the connection URL to satisfy require_secure_transport
-    ssl_params = "?ssl=true"
+    # URL encode the password to handle special characters
+    encoded_password = urllib.parse.quote_plus(db_password) if db_password else ""
     
-    return f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}{ssl_params}"
+    # Use PostgreSQL connection string
+    return f"postgresql://{db_user}:{encoded_password}@{db_host}:{db_port}/{db_name}"
 
 def connect_to_database():
     """Connect to the database and return a session"""
@@ -36,17 +42,14 @@ def connect_to_database():
         db_url = get_database_url()
         logging.info(f"Connecting to database with URL: {db_url.split('@')[1]}")  # Log URL without credentials
         
-        # Configure the engine with SSL settings and connection pooling
+        # Configure the engine with connection pooling for PostgreSQL
         engine = create_engine(
             db_url,
-            connect_args={
-                'ssl': {
-                    'ssl_mode': 'REQUIRED'
-                }
-            },
-            echo=False,  # Set to True for SQL query debugging
-            pool_recycle=3600,  # Recycle connections after 1 hour
-            pool_pre_ping=True  # Check connection validity before use
+            pool_size=10,
+            max_overflow=20,
+            pool_timeout=30,
+            pool_recycle=3600,
+            pool_pre_ping=True
         )
         
         # Try to connect and verify connection works
