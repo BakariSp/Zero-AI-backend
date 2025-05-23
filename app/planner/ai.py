@@ -1,5 +1,6 @@
 import logging
 import json
+import asyncio
 from fastapi import APIRouter, Depends, Body, HTTPException
 from typing import Dict, Any
 from datetime import datetime
@@ -17,7 +18,6 @@ def get_general_model_deployment() -> str:
 
 @router.post(
     "/dialogue",
-    # response_model=DialogueResponse, # Add if you define a response model
     summary="Process user input via Dialogue Planner",
     description="""Receives user input, optional chat history, and the current learning plan.
 Determines intent, calls appropriate sub-agents (PathPlanner, CourseGenerator, etc.),
@@ -55,11 +55,18 @@ async def handle_dialogue_endpoint(
         # Process the input using the agent
         logging.info("Starting AI processing...")
         try:
-            response = await dialogue_planner.process_user_input(
-                user_input=payload.user_input,
-                context=context
+            # Add timeout to prevent hanging requests
+            response = await asyncio.wait_for(
+                dialogue_planner.process_user_input(
+                    user_input=payload.user_input,
+                    context=context
+                ),
+                timeout=240.0  # Increase to 4 minutes to be longer than frontend timeout
             )
             logging.info("AI processing completed successfully")
+        except asyncio.TimeoutError:
+            logging.error("AI processing timed out after 240 seconds")
+            raise HTTPException(status_code=504, detail="AI processing timed out after 4 minutes. Please try again with a simpler request.")
         except Exception as process_error:
             logging.error(f"Failed during process_user_input: {process_error}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"AI processing failed: {process_error}")
@@ -67,6 +74,15 @@ async def handle_dialogue_endpoint(
         # Add response construction logging as suggested by frontend team
         logging.info("Starting response construction...")
         logging.info(f"Response data type: {type(response)}")
+        
+        # Validate response is not None and is a dict
+        if response is None:
+            logging.error("Response from dialogue_planner.process_user_input is None")
+            raise HTTPException(status_code=500, detail="AI processing returned None response")
+        
+        if not isinstance(response, dict):
+            logging.error(f"Response is not a dict: {type(response)}")
+            raise HTTPException(status_code=500, detail=f"AI processing returned invalid response type: {type(response)}")
         
         # Log the keys and basic structure of the response
         if isinstance(response, dict):
@@ -89,7 +105,18 @@ async def handle_dialogue_endpoint(
         required_keys = ['ai_reply', 'result', 'status', 'triggered_agent']
         missing_keys = [key for key in required_keys if key not in response]
         if missing_keys:
+            logging.error(f"Response missing required keys: {missing_keys}")
+            logging.error(f"Available keys: {list(response.keys())}")
             raise ValueError(f"Response missing required keys: {missing_keys}")
+        
+        # Validate each required component
+        if not isinstance(response.get('result'), dict):
+            logging.error(f"Result is not a dict: {type(response.get('result'))}")
+            raise ValueError(f"Result must be a dict, got {type(response.get('result'))}")
+            
+        if not isinstance(response.get('status'), dict):
+            logging.error(f"Status is not a dict: {type(response.get('status'))}")
+            raise ValueError(f"Status must be a dict, got {type(response.get('status'))}")
         
         # Check for circular references and complex objects before JSON serialization
         logging.info("Checking for potential serialization issues...")
@@ -121,19 +148,20 @@ async def handle_dialogue_endpoint(
                 return False
         
         if not check_serializability(response):
+            logging.error("Response contains non-serializable objects")
             raise ValueError("Response contains non-serializable objects")
         
-        # Test JSON serialization
+        # Test JSON serialization of original response
         try:
             json_string = json.dumps(response, ensure_ascii=False, default=str)
-            logging.info(f"JSON serialization successful, length: {len(json_string)} bytes")
+            logging.info(f"Original response JSON serialization successful, length: {len(json_string)} bytes")
             
             # Check if response is too large
             if len(json_string) > 1024 * 1024:  # 1MB
                 logging.warning(f"Response size is very large: {len(json_string)} bytes")
                 
         except Exception as json_error:
-            logging.error(f"JSON serialization failed: {json_error}")
+            logging.error(f"Original response JSON serialization failed: {json_error}")
             logging.error(f"JSON error type: {type(json_error)}")
             
             # Try to identify the problematic part
@@ -155,34 +183,146 @@ async def handle_dialogue_endpoint(
             except Exception as e:
                 logging.error(f"result serialization failed: {e}")
                 
-            raise ValueError(f"Response not JSON serializable: {json_error}")
+            raise ValueError(f"Original response not JSON serializable: {json_error}")
         
         logging.info(f"Response construction successful. AI reply length: {len(response.get('ai_reply', ''))}")
         logging.info(f"Response status: {response.get('status', {})}")
         
         # Create a clean response structure to ensure no database objects are included
-        clean_response = {
-            "ai_reply": str(response.get("ai_reply", "")),
-            "status": {
-                "has_learning_path": bool(response.get("status", {}).get("has_learning_path", False)),
-                "has_courses": bool(response.get("status", {}).get("has_courses", False)),
-                "has_sections": bool(response.get("status", {}).get("has_sections", False)),
-                "has_cards": bool(response.get("status", {}).get("has_cards", False))
-            },
-            "result": {},
-            "triggered_agent": str(response.get("triggered_agent", "Unknown"))
-        }
+        logging.info("Creating clean response structure...")
+        try:
+            clean_response = {
+                "ai_reply": str(response.get("ai_reply", "")),
+                "status": {
+                    "has_learning_path": bool(response.get("status", {}).get("has_learning_path", False)),
+                    "has_courses": bool(response.get("status", {}).get("has_courses", False)),
+                    "has_sections": bool(response.get("status", {}).get("has_sections", False)),
+                    "has_cards": bool(response.get("status", {}).get("has_cards", False))
+                },
+                "result": {},
+                "triggered_agent": str(response.get("triggered_agent", "Unknown"))
+            }
+            logging.info("Basic clean response structure created successfully")
+        except Exception as e:
+            logging.error(f"Failed to create basic clean response structure: {e}")
+            raise ValueError(f"Failed to create clean response: {e}")
         
-        # Safely copy result components
+        # Safely copy result components with more defensive conversion
         result = response.get("result", {})
-        if result.get("learning_path"):
-            clean_response["result"]["learning_path"] = dict(result["learning_path"]) if result["learning_path"] else None
-        if result.get("courses"):
-            clean_response["result"]["courses"] = list(result["courses"]) if result["courses"] else None
-        if result.get("sections"):
-            clean_response["result"]["sections"] = list(result["sections"]) if result["sections"] else None
-        if result.get("cards"):
-            clean_response["result"]["cards"] = list(result["cards"]) if result["cards"] else None
+        
+        try:
+            # Handle learning_path
+            if result.get("learning_path"):
+                try:
+                    lp = result["learning_path"]
+                    if isinstance(lp, dict):
+                        clean_response["result"]["learning_path"] = {
+                            k: str(v) if v is not None else None 
+                            for k, v in lp.items()
+                        }
+                    else:
+                        clean_response["result"]["learning_path"] = None
+                        logging.warning(f"learning_path is not a dict: {type(lp)}")
+                except Exception as e:
+                    logging.error(f"Error processing learning_path: {e}")
+                    clean_response["result"]["learning_path"] = None
+            else:
+                clean_response["result"]["learning_path"] = None
+                
+            # Handle courses
+            if result.get("courses"):
+                try:
+                    courses = result["courses"]
+                    if isinstance(courses, list):
+                        clean_courses = []
+                        for course in courses:
+                            if isinstance(course, dict):
+                                clean_course = {}
+                                for k, v in course.items():
+                                    if k == "sections" and isinstance(v, list):
+                                        # Handle nested sections
+                                        clean_sections = []
+                                        for section in v:
+                                            if isinstance(section, dict):
+                                                clean_section = {
+                                                    sk: str(sv) if sv is not None and sk != "card_keywords" else sv
+                                                    for sk, sv in section.items()
+                                                }
+                                                clean_sections.append(clean_section)
+                                        clean_course[k] = clean_sections
+                                    else:
+                                        clean_course[k] = str(v) if v is not None else None
+                                clean_courses.append(clean_course)
+                        clean_response["result"]["courses"] = clean_courses
+                    else:
+                        clean_response["result"]["courses"] = None
+                        logging.warning(f"courses is not a list: {type(courses)}")
+                except Exception as e:
+                    logging.error(f"Error processing courses: {e}")
+                    clean_response["result"]["courses"] = None
+            else:
+                clean_response["result"]["courses"] = None
+                
+            # Handle sections (if separate from courses)
+            if result.get("sections"):
+                try:
+                    sections = result["sections"]
+                    if isinstance(sections, list):
+                        clean_response["result"]["sections"] = [
+                            {k: str(v) if v is not None else None for k, v in section.items()}
+                            if isinstance(section, dict) else str(section)
+                            for section in sections
+                        ]
+                    else:
+                        clean_response["result"]["sections"] = None
+                        logging.warning(f"sections is not a list: {type(sections)}")
+                except Exception as e:
+                    logging.error(f"Error processing sections: {e}")
+                    clean_response["result"]["sections"] = None
+            else:
+                clean_response["result"]["sections"] = None
+                
+            # Handle cards
+            if result.get("cards"):
+                try:
+                    cards = result["cards"]
+                    if isinstance(cards, list):
+                        clean_response["result"]["cards"] = [
+                            {k: str(v) if v is not None else None for k, v in card.items()}
+                            if isinstance(card, dict) else str(card)
+                            for card in cards
+                        ]
+                    else:
+                        clean_response["result"]["cards"] = None
+                        logging.warning(f"cards is not a list: {type(cards)}")
+                except Exception as e:
+                    logging.error(f"Error processing cards: {e}")
+                    clean_response["result"]["cards"] = None
+            else:
+                clean_response["result"]["cards"] = None
+                
+            logging.info("Clean response data conversion completed successfully")
+            
+        except Exception as conversion_error:
+            logging.error(f"Critical error during clean response conversion: {conversion_error}", exc_info=True)
+            # Create a minimal fallback response
+            clean_response = {
+                "ai_reply": "I processed your request, but encountered an issue formatting the response. Please try again.",
+                "status": {
+                    "has_learning_path": False,
+                    "has_courses": False,
+                    "has_sections": False,
+                    "has_cards": False
+                },
+                "result": {
+                    "learning_path": None,
+                    "courses": None,
+                    "sections": None,
+                    "cards": None
+                },
+                "triggered_agent": "Error"
+            }
+            logging.info("Using fallback response due to conversion error")
         
         # Final serialization test of clean response
         try:
@@ -191,6 +331,11 @@ async def handle_dialogue_endpoint(
         except Exception as e:
             logging.error(f"Clean response serialization failed: {e}")
             raise ValueError(f"Clean response not serializable: {e}")
+        
+        logging.info("=== ABOUT TO RETURN RESPONSE ===")
+        logging.info(f"Response type: {type(clean_response)}")
+        logging.info(f"Response keys: {list(clean_response.keys())}")
+        logging.info("=== RETURNING CLEAN RESPONSE ===")
         
         return clean_response
 
@@ -322,7 +467,6 @@ async def test_ai_client_endpoint(
         logging.info(f"Deployment: {deployment}")
         
         # Test a simple completion
-        import asyncio
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model=deployment,
@@ -431,6 +575,63 @@ async def test_process_input_endpoint(
             "error_type": str(type(e)),
             "message": "process_user_input test failed"
         }
+
+@router.post("/dialogue-simple")
+async def simple_dialogue_endpoint(
+    payload: DialogueInput = Body(...),
+    client = Depends(get_ai_client),
+    deployment: str = Depends(get_general_model_deployment)
+) -> Dict[str, Any]:
+    """
+    Simplified version of the main dialogue endpoint that returns a minimal response
+    to test if the issue is related to response size or complexity.
+    """
+    try:
+        logging.info(f"Simple dialogue endpoint called with user_input: '{payload.user_input[:50]}...'")
+        
+        # Create a minimal response similar to the main endpoint structure
+        simple_response = {
+            "ai_reply": f"I received your message: '{payload.user_input}'. This is a simplified response.",
+            "status": {
+                "has_learning_path": False,
+                "has_courses": False,
+                "has_sections": False,
+                "has_cards": False
+            },
+            "result": {
+                "learning_path": None,
+                "courses": None,
+                "sections": None,
+                "cards": None
+            },
+            "triggered_agent": "Simple"
+        }
+        
+        logging.info("=== SIMPLE ENDPOINT ABOUT TO RETURN ===")
+        logging.info(f"Simple response type: {type(simple_response)}")
+        logging.info("=== RETURNING SIMPLE RESPONSE ===")
+        
+        return simple_response
+        
+    except Exception as e:
+        logging.error(f"Simple dialogue endpoint error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Simple endpoint error: {e}")
+
+@router.get("/health")
+async def health_check():
+    """
+    Health check endpoint to verify the planner API is running and responsive.
+    """
+    try:
+        return {
+            "status": "healthy",
+            "timestamp": str(datetime.now()),
+            "service": "planner-api",
+            "version": "1.0"
+        }
+    except Exception as e:
+        logging.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=500, detail="Health check failed")
 
 # Make sure this router is included in your main FastAPI app (e.g., in app/main.py)
 # Example:

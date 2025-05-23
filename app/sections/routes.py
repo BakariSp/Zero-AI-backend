@@ -1,11 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime, timezone
 
 from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from app.models import User, CourseSection, UserSection, Card, Course, UserLearningPath, section_cards, user_section_cards, course_section_association, UserCourse
 from app.sections import crud
 from app.sections.schemas import (
@@ -80,10 +80,11 @@ def get_section(
 # 获取用户的自定义章节列表
 @router.get("/users/me/sections", response_model=List[UserSectionResponse])
 def get_user_sections(
+    request: Request,
     skip: int = 0, 
     limit: int = 100, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """获取当前用户的自定义章节列表"""
     sections = crud.get_user_sections(db, user_id=current_user.id, skip=skip, limit=limit)
@@ -95,8 +96,9 @@ def get_user_sections(
 @router.get("/users/me/sections/{section_id}", response_model=UserSectionResponse)
 def get_user_section(
     section_id: int, # This section_id from URL is template_section_id
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get a single user section detail, where section_id is the TEMPLATE section ID.
@@ -135,8 +137,9 @@ def get_user_section(
 @router.post("/users/me/sections", response_model=UserSectionResponse)
 def create_user_section(
     section_data: UserSectionCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """创建用户自定义章节，可以基于模板或从头创建"""
     if section_data.section_template_id:
@@ -151,8 +154,9 @@ def create_user_section(
 def update_user_section(
     section_id: int,
     section_data: UserSectionUpdate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """更新用户自定义章节信息"""
     section = crud.find_user_section(db, user_id=current_user.id, section_id=section_id)
@@ -169,9 +173,10 @@ def update_user_section(
 def update_user_section_progress(
     section_id: int,
     progress: float,
+    request: Request,
     update_related: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Update the progress of a user's section
@@ -269,8 +274,9 @@ def update_user_section_progress(
 @router.delete("/users/me/sections/{section_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user_section(
     section_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """删除用户自定义章节"""
     section = crud.find_user_section(db, user_id=current_user.id, section_id=section_id)
@@ -288,8 +294,9 @@ def delete_user_section(
 def add_card_to_section(
     section_id: int,
     card_data: CardInSectionCreate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """向用户自定义章节添加卡片"""
     section = crud.find_user_section(db, user_id=current_user.id, section_id=section_id)
@@ -313,8 +320,9 @@ def update_card_in_section(
     section_id: int,
     card_id: int,
     card_data: CardInSectionUpdate,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """更新用户章节中卡片的顺序"""
     section = crud.find_user_section(db, user_id=current_user.id, section_id=section_id)
@@ -336,8 +344,9 @@ def update_card_in_section(
 def remove_card_from_section(
     section_id: int,
     card_id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """从用户章节中移除卡片"""
     section = crud.find_user_section(db, user_id=current_user.id, section_id=section_id)
@@ -352,8 +361,9 @@ def remove_card_from_section(
 @router.post("/course-sections", response_model=SectionResponse)
 def create_course_section(
     data: Dict[str, Any],
+    request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Create a section for a course"""
     try:
@@ -424,7 +434,7 @@ async def generate_test_cards_for_section(
     section_id: int,
     num_cards: int = Query(5, ge=1, le=10), # Default 5, min 1, max 10
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user) # Add auth if needed
+    current_user: User = Depends(get_current_active_user_unified) # Add auth if needed
 ):
     """
     Generates a specified number of test flashcards for a given section's topic
@@ -504,7 +514,7 @@ async def generate_test_cards_for_section(
 @router.post("/users/me/fix-missing-sections", status_code=status.HTTP_200_OK)
 def fix_missing_sections(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Utility endpoint to fix missing user sections by creating them from template sections.
@@ -599,7 +609,7 @@ def fix_missing_sections(
 def fix_section_card_completion(
     section_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Utility endpoint to fix inconsistencies between section progress and card completion status.
