@@ -38,31 +38,59 @@ def get_user_by_oauth(db: Session, provider: str, oauth_id: str):
         User.oauth_id == oauth_id
     ).first()
 
-def create_user(db: Session, user: UserCreate, oauth_provider: str = None, oauth_id: str = None, profile_picture: str = None):
-    """
-    Create a new user in the database
-    """
-    # Hash the password if it's provided
-    hashed_password = pwd_context.hash(user.password) if user.password else None
-    
-    # Create a new User object
-    db_user = User(
-        email=user.email,
-        username=user.username,
-        hashed_password=hashed_password,
-        full_name=user.full_name,
-        is_active=True,
-        oauth_provider=oauth_provider,
-        oauth_id=oauth_id,
-        profile_picture=profile_picture
-    )
-    
-    # Add the user to the database
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    
-    return db_user
+def create_user(
+    db: Session,
+    user: UserCreate,
+    oauth_provider: Optional[str] = None,
+    oauth_id: Optional[str] = None,
+    profile_picture: Optional[str] = None,
+    is_guest: bool = False
+) -> User:
+    """Create a new user with optional OAuth data"""
+    try:
+        # Hash the password if provided
+        hashed_password = None
+        if user.password:
+            hashed_password = pwd_context.hash(user.password)
+        
+        # Create the user object
+        db_user = User(
+            email=user.email,
+            username=user.username,
+            hashed_password=hashed_password,
+            is_active=user.is_active,
+            oauth_provider=oauth_provider,
+            oauth_id=oauth_id,
+            full_name=user.full_name,
+            profile_picture=profile_picture,
+            is_guest=is_guest,
+            last_active_at=datetime.utcnow() if is_guest else None
+        )
+        
+        # Add and commit the user
+        db.add(db_user)
+        db.flush()  # Flush to get the ID without committing
+        
+        # Log the user creation
+        logging.info(f"Creating user: email={user.email}, username={user.username}, oauth_provider={oauth_provider}, oauth_id={oauth_id}, is_guest={is_guest}")
+        
+        # Commit the transaction
+        db.commit()
+        
+        # Refresh to get all fields
+        db.refresh(db_user)
+        
+        logging.info(f"Successfully created user with ID: {db_user.id}")
+        return db_user
+        
+    except Exception as e:
+        # Rollback on error
+        db.rollback()
+        logging.error(f"Error creating user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create user: {str(e)}"
+        )
 
 def update_user(db: Session, user_id: int, user_data: Dict[str, Any]) -> User:
     logging.info(f"Updating user {user_id} with data: {user_data}")

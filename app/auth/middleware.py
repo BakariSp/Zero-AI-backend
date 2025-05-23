@@ -61,123 +61,43 @@ class SupabaseAuthMiddleware(BaseHTTPMiddleware):
             # Only do this for routes that require user data beyond just authentication
             # This avoids database calls for static resources or public endpoints
             if self._should_sync_with_database(request.url.path):
-                # Get user from database
-                db = SessionLocal()
                 try:
-                    email = supabase_user.get("email")
-                    if email:
-                        logger.info(f"Looking up user with email {email} in database")
-                        user = get_user_by_email(db, email=email)
-                        if user:
-                            # Store the user in request state
-                            request.state.user = user
-                            logger.info(f"Found user in database for {email} (User ID: {user.id})")
-                            
-                            # IMPORTANT: Add debug prints to verify the state
-                            logger.info(f"Verified request.state.user is set to User object ID: {user.id} at middleware step")
-                        else:
-                            # User doesn't exist in our database yet - create the user automatically
-                            logger.info(f"User with email {email} authenticated via Supabase but not found in database")
-                            logger.info(f"Auto-creating user account for {email}")
-                            
-                            # Generate username from email if not provided
-                            username = supabase_user.get("username") or email.split("@")[0]
-                            
-                            # Extract name from Supabase user data if available
-                            full_name = supabase_user.get("user_metadata", {}).get("full_name")
-                            if not full_name:
-                                full_name = supabase_user.get("name") or ""
-                            
-                            # Create user data
-                            user_data = UserCreate(
-                                email=email,
-                                username=username,
-                                password="",  # No password for Supabase users
-                                full_name=full_name,
-                                is_active=True
-                            )
-                            
-                            try:
-                                # Create the user in the database
-                                new_user = create_user(
-                                    db=db,
-                                    user=user_data,
-                                    oauth_provider="supabase",
-                                    oauth_id=supabase_user.get("id"),
-                                    profile_picture=supabase_user.get("avatar_url")
-                                )
-                                
-                                # IMPORTANT: Explicitly commit changes to make sure they're persisted
-                                db.commit()
-                                
-                                # Verify the user was created
-                                check_user = get_user_by_email(db, email=email)
-                                if check_user:
-                                    logger.info(f"Verified user was created with ID: {check_user.id}")
-                                else:
-                                    logger.error(f"User creation was not persisted for {email}")
-                                
-                                # Store the new user in request state
-                                request.state.user = new_user
-                                logger.info(f"Successfully created user account for {email} (User ID: {new_user.id})")
-                                
-                                # Verify the state again
-                                logger.info(f"Verified request.state.user is set to new User object ID: {new_user.id}")
-                            except Exception as e:
-                                db.rollback()  # Ensure we rollback on error
-                                logger.error(f"Error creating user account for {email}: {str(e)}")
+                    # Get or create user in our database
+                    user = await self._sync_user_with_database(supabase_user)
+                    if user:
+                        logger.info(f"User synchronized with database: {user.id}")
+                        request.state.user = user
+                        request.state.debug_user_id = str(user.id)
                     else:
-                        logger.warning("Supabase user data missing email")
+                        logger.warning(f"Failed to sync user with database for {request.url.path}")
+                        # Keep the Supabase user data for fallback authentication
+                        request.state.user = supabase_user
                 except Exception as e:
-                    logger.error(f"Database error in SupabaseAuthMiddleware: {str(e)}")
-                    db.rollback()  # Ensure we rollback on error
-                finally:
-                    # Always close the DB session
-                    db.close()
-        else:
-            # For legacy purposes, try to handle both Supabase and JWT tokens
-            # This code will be removed when fully migrated to Supabase
-            if auth_header and auth_header.startswith("Bearer "):
-                logger.info(f"Supabase authentication failed, token might be legacy JWT: {request.url.path}")
-        
-        # Log user state before proceeding
-        if hasattr(request.state, "user") and request.state.user is not None:
-            if isinstance(request.state.user, dict):
-                logger.info(f"Request proceeding with user dict: {request.state.user.get('email', 'unknown')}")
+                    logger.error(f"Error syncing user with database: {str(e)}")
+                    # Fall back to using Supabase user data only
+                    request.state.user = supabase_user
             else:
-                logger.info(f"Request proceeding with user object, ID: {request.state.user.id}, Email: {request.state.user.email}")
-                # Store user ID in a debug header for tracing
-                user_id = getattr(request.state.user, "id", "unknown")
-                request.state.debug_user_id = str(user_id)
-                
-                # CRITICAL FIX: Ensure we have a properly initialized user object
-                # Sometimes the user object can get lost in serialization between middleware and route
-                try:
-                    # Test serialization to ensure it's a valid object
-                    from fastapi.encoders import jsonable_encoder
-                    user_json = jsonable_encoder(request.state.user)
-                    logger.info(f"Successfully serialized user object in middleware")
-                except Exception as e:
-                    logger.error(f"Error serializing user object in middleware: {str(e)}")
-                    # Since there was an error, let's create a fresh copy of the user object
-                    from app.models import User
-                    try:
-                        original_user = request.state.user
-                        # Create a copy with just the essential attributes
-                        request.state.user = User(
-                            id=original_user.id,
-                            email=original_user.email,
-                            username=original_user.username,
-                            full_name=original_user.full_name,
-                            is_active=original_user.is_active,
-                            subscription_type=getattr(original_user, "subscription_type", "free")
-                        )
-                        logger.info(f"Created fresh copy of user object in middleware: {request.state.user.id}")
-                    except Exception as e:
-                        logger.error(f"Failed to create fresh user copy: {str(e)}")
+                logger.info(f"Skipping database sync for path: {request.url.path}")
+                # For paths that don't need database sync, just use Supabase data
+                request.state.user = supabase_user
         else:
-            logger.info(f"Request proceeding without user object in state")
+            logger.info(f"No Supabase authentication for {request.url.path}")
+        
+        # Continue processing the request
+        try:
+            # Check if user object is available in state before proceeding
+            has_user = hasattr(request.state, "user") and request.state.user is not None
+            if has_user:
+                if isinstance(request.state.user, dict):
+                    logger.info(f"Request proceeding with legacy user dict: {request.state.user.get('id', 'unknown')}")
+                else:
+                    logger.info(f"Request proceeding with User object: {request.state.user.id}")
+            else:
+                logger.info(f"Request proceeding without user object in state")
             
+        except Exception as e:
+            logger.error(f"Error in middleware pre-processing: {str(e)}")
+        
         # Process the request
         response = await call_next(request)
         
@@ -235,3 +155,172 @@ class SupabaseAuthMiddleware(BaseHTTPMiddleware):
         
         # For all other paths, sync with database
         return True 
+
+    async def _sync_user_with_database(self, supabase_user: dict):
+        """
+        Synchronize Supabase user with our database.
+        Creates a new user if they don't exist, updates if they do.
+        
+        Args:
+            supabase_user: User data from Supabase
+            
+        Returns:
+            User: The user object from our database
+        """
+        try:
+            db = SessionLocal()
+            try:
+                email = supabase_user.get("email")
+                user_id = supabase_user.get("id")
+                is_anonymous = supabase_user.get("is_anonymous", False)
+                
+                # 🔍 DEBUG: 记录接收到的Supabase用户数据
+                logger.info(f"🔍 [SYNC DEBUG] Received Supabase user data:")
+                logger.info(f"🔍 [SYNC DEBUG] - user_id: {user_id}")
+                logger.info(f"🔍 [SYNC DEBUG] - email: {email}")
+                logger.info(f"🔍 [SYNC DEBUG] - is_anonymous: {is_anonymous}")
+                logger.info(f"🔍 [SYNC DEBUG] - full supabase_user keys: {list(supabase_user.keys())}")
+                logger.info(f"🔍 [SYNC DEBUG] - user_metadata: {supabase_user.get('user_metadata', {})}")
+                
+                if not user_id:
+                    logger.error("🔍 [SYNC DEBUG] ERROR: No user ID found in Supabase user data")
+                    return None
+                
+                # First, try to find user by oauth_id (Supabase user ID)
+                existing_user = None
+                try:
+                    from app.users.crud import get_user_by_oauth
+                    existing_user = get_user_by_oauth(db, "supabase", user_id)
+                    logger.info(f"🔍 [SYNC DEBUG] Lookup by oauth_id result: {'Found' if existing_user else 'Not found'}")
+                except Exception as e:
+                    logger.warning(f"🔍 [SYNC DEBUG] Error looking up user by oauth_id: {str(e)}")
+                
+                # If not found by oauth_id and we have an email, try by email
+                if not existing_user and email:
+                    try:
+                        existing_user = get_user_by_email(db, email)
+                        logger.info(f"🔍 [SYNC DEBUG] Lookup by email result: {'Found' if existing_user else 'Not found'}")
+                        # If found by email but no oauth_id, update it
+                        if existing_user and not existing_user.oauth_id:
+                            existing_user.oauth_provider = "supabase"
+                            existing_user.oauth_id = user_id
+                            db.commit()
+                            logger.info(f"🔍 [SYNC DEBUG] Updated existing user {existing_user.id} with Supabase oauth_id")
+                    except Exception as e:
+                        logger.warning(f"🔍 [SYNC DEBUG] Error looking up user by email: {str(e)}")
+                
+                if existing_user:
+                    logger.info(f"🔍 [SYNC DEBUG] Found existing user: {existing_user.id}, returning existing user")
+                    return existing_user
+                
+                # Create new user
+                logger.info(f"🔍 [SYNC DEBUG] Creating new user for Supabase ID: {user_id}")
+                
+                # For anonymous users, create special email and username
+                if is_anonymous or not email:
+                    # 🔧 FIX: 生成符合验证规则的数据
+                    # 1. 用户名：只包含字母和数字（移除所有特殊字符）
+                    # 2. 邮箱：使用真实的域名而不是保留域名
+                    safe_user_id = user_id.replace("-", "").replace("_", "")  # 移除所有连字符和下划线
+                    username = f"anonymous{safe_user_id}"  # 纯字母数字
+                    email = f"anonymous{safe_user_id}@example.com"  # 使用example.com域名
+                    full_name = "Anonymous User"
+                    is_guest = True
+                    
+                    logger.info(f"🔍 [SYNC DEBUG] Anonymous user data prepared:")
+                    logger.info(f"🔍 [SYNC DEBUG] - original_user_id: {user_id}")
+                    logger.info(f"🔍 [SYNC DEBUG] - safe_user_id: {safe_user_id}")
+                    logger.info(f"🔍 [SYNC DEBUG] - email: {email}")
+                    logger.info(f"🔍 [SYNC DEBUG] - username: {username}")
+                    logger.info(f"🔍 [SYNC DEBUG] - username.isalnum(): {username.isalnum()}")
+                else:
+                    # For regular users, use their email
+                    # 确保用户名也符合纯字母数字的要求
+                    base_username = email.split("@")[0] if email else f"user{user_id.replace('-', '').replace('_', '')}"
+                    # 移除用户名中的特殊字符，只保留字母数字
+                    username = ''.join(c for c in base_username if c.isalnum())
+                    # 如果处理后用户名为空，使用默认格式
+                    if not username:
+                        username = f"user{user_id.replace('-', '').replace('_', '')}"
+                    
+                    full_name = supabase_user.get("user_metadata", {}).get("full_name") or \
+                               supabase_user.get("user_metadata", {}).get("name") or ""
+                    is_guest = False
+                    
+                    logger.info(f"🔍 [SYNC DEBUG] Regular user data prepared:")
+                    logger.info(f"🔍 [SYNC DEBUG] - email: {email}")
+                    logger.info(f"🔍 [SYNC DEBUG] - base_username: {base_username}")
+                    logger.info(f"🔍 [SYNC DEBUG] - username: {username}")
+                    logger.info(f"🔍 [SYNC DEBUG] - username.isalnum(): {username.isalnum()}")
+                    logger.info(f"🔍 [SYNC DEBUG] - full_name: {full_name}")
+                
+                # Create user data
+                user_data = UserCreate(
+                    email=email,
+                    username=username,
+                    password="",  # No password for Supabase users
+                    full_name=full_name,
+                    is_active=True,
+                    subscription_type="free"
+                )
+                
+                logger.info(f"🔍 [SYNC DEBUG] UserCreate object created successfully:")
+                logger.info(f"🔍 [SYNC DEBUG] - email: {user_data.email}")
+                logger.info(f"🔍 [SYNC DEBUG] - username: {user_data.username}")
+                logger.info(f"🔍 [SYNC DEBUG] - full_name: {user_data.full_name}")
+                logger.info(f"🔍 [SYNC DEBUG] - is_active: {user_data.is_active}")
+                logger.info(f"🔍 [SYNC DEBUG] - subscription_type: {user_data.subscription_type}")
+                
+                # 🔍 DEBUG: 记录即将传递给create_user的参数
+                logger.info(f"🔍 [SYNC DEBUG] Calling create_user with:")
+                logger.info(f"🔍 [SYNC DEBUG] - oauth_provider: supabase")
+                logger.info(f"🔍 [SYNC DEBUG] - oauth_id: {user_id}")
+                logger.info(f"🔍 [SYNC DEBUG] - is_guest: {is_guest}")
+                logger.info(f"🔍 [SYNC DEBUG] - profile_picture: {supabase_user.get('user_metadata', {}).get('avatar_url')}")
+                
+                # Create the user
+                new_user = create_user(
+                    db=db,
+                    user=user_data,
+                    oauth_provider="supabase",
+                    oauth_id=user_id,
+                    profile_picture=supabase_user.get("user_metadata", {}).get("avatar_url"),
+                    is_guest=is_guest
+                )
+                
+                logger.info(f"🔍 [SYNC DEBUG] create_user call completed successfully")
+                
+                # Commit the transaction
+                db.commit()
+                logger.info(f"🔍 [SYNC DEBUG] Database transaction committed")
+                
+                db.refresh(new_user)
+                logger.info(f"🔍 [SYNC DEBUG] User object refreshed from database")
+                
+                logger.info(f"🔍 [SYNC DEBUG] ✅ Successfully created new user:")
+                logger.info(f"🔍 [SYNC DEBUG] - Database ID: {new_user.id}")
+                logger.info(f"🔍 [SYNC DEBUG] - Email: {new_user.email}")
+                logger.info(f"🔍 [SYNC DEBUG] - Username: {new_user.username}")
+                logger.info(f"🔍 [SYNC DEBUG] - Is guest: {new_user.is_guest}")
+                logger.info(f"🔍 [SYNC DEBUG] - OAuth ID: {new_user.oauth_id}")
+                logger.info(f"🔍 [SYNC DEBUG] - OAuth Provider: {new_user.oauth_provider}")
+                
+                return new_user
+                
+            except Exception as e:
+                db.rollback()
+                logger.error(f"🔍 [SYNC DEBUG] ❌ Database error in user sync: {str(e)}")
+                logger.error(f"🔍 [SYNC DEBUG] Exception type: {type(e).__name__}")
+                import traceback
+                logger.error(f"🔍 [SYNC DEBUG] Full traceback: {traceback.format_exc()}")
+                return None
+            finally:
+                db.close()
+                logger.info(f"🔍 [SYNC DEBUG] Database connection closed")
+                
+        except Exception as e:
+            logger.error(f"🔍 [SYNC DEBUG] ❌ General error in user sync: {str(e)}")
+            logger.error(f"🔍 [SYNC DEBUG] Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"🔍 [SYNC DEBUG] Full traceback: {traceback.format_exc()}")
+            return None 

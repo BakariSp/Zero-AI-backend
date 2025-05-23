@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from typing import Optional
+import uuid
 
 from fastapi import Depends, HTTPException, status, APIRouter, Form, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -8,18 +9,19 @@ from pydantic import BaseModel
 import os
 from sqlalchemy.orm import Session
 
-from app.users.crud import get_user_by_email
+from app.users.crud import get_user_by_email, create_user, get_user_by_oauth, update_user
 from app.db import SessionLocal
 from app.models import User
 from passlib.context import CryptContext
 import logging
+from app.utils.supabase import supabase_client
+from app.users.schemas import UserCreate
+from app.users import schemas
 
 # Get JWT settings from environment variables or use defaults
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-for-jwt-please-change-in-production")
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-# Guest tokens can be longer-lived
-GUEST_TOKEN_EXPIRE_DAYS = int(os.getenv("GUEST_TOKEN_EXPIRE_DAYS", "30"))
 
 # Create a custom OAuth2 scheme that will be skipped for OPTIONS requests
 class CustomOAuth2PasswordBearer(OAuth2PasswordBearer):
@@ -66,7 +68,6 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
-    is_guest: Optional[bool] = False
 
 # Dependency to get the database session
 def get_db():
@@ -93,16 +94,10 @@ def authenticate_user(db, email: str, password: str):
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     
-    # Use longer expiration for guest users
-    if to_encode.get("is_guest"):
-        default_expiry = timedelta(days=GUEST_TOKEN_EXPIRE_DAYS)
-    else:
-        default_expiry = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + default_expiry
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -125,31 +120,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         if email is None:
             raise credentials_exception
         
-        # Extract guest flag from token if present
-        is_guest: bool = payload.get("is_guest", False)
-        token_data = TokenData(email=email, is_guest=is_guest)
+        token_data = TokenData(email=email)
     except JWTError:
         raise credentials_exception
     
     user = get_user(db, email=token_data.email)
     if user is None:
         raise credentials_exception
-    
-    # Handle guest users that have been merged into regular accounts
-    if user.merged_into_user_id:
-        # Get the real user that this guest was merged into
-        real_user = db.query(User).filter_by(id=user.merged_into_user_id).first()
-        if real_user:
-            logging.info(f"Guest user {user.id} has been merged into user {real_user.id}, using the real user")
-            return real_user
-        else:
-            logging.error(f"Guest user {user.id} was merged into user {user.merged_into_user_id} but that user was not found")
-            raise credentials_exception
-    
-    # Update last_active_at for guest users
-    if user.is_guest:
-        user.last_active_at = datetime.utcnow()
-        db.commit()
     
     return user
 
@@ -183,7 +160,7 @@ async def get_current_active_user(current_user = Depends(get_current_user), requ
         logging.warning(f"User {current_user.id} is inactive")
         raise HTTPException(status_code=400, detail="Inactive user")
     
-    logging.info(f"Successfully authenticated user: {current_user.id} (guest: {current_user.is_guest})")
+    logging.info(f"Successfully authenticated user: {current_user.id}")
     return current_user
 
 async def get_current_user_optional(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -201,27 +178,13 @@ async def get_current_user_optional(token: str = Depends(oauth2_scheme), db: Ses
         if email is None:
             return None
         
-        # Extract guest flag from token if present
-        is_guest: bool = payload.get("is_guest", False)
-        token_data = TokenData(email=email, is_guest=is_guest)
+        token_data = TokenData(email=email)
     except JWTError:
         return None
     
     user = get_user(db, email=token_data.email)
     if user is None or not user.is_active:
         return None
-    
-    # Handle guest users that have been merged into regular accounts
-    if user.merged_into_user_id:
-        # Get the real user that this guest was merged into
-        real_user = db.query(User).filter_by(id=user.merged_into_user_id).first()
-        if real_user:
-            return real_user
-    
-    # Update last_active_at for guest users
-    if user.is_guest:
-        user.last_active_at = datetime.utcnow()
-        db.commit()
         
     return user
 
@@ -249,3 +212,93 @@ async def login_for_access_token(
     except Exception as e:
         print(f"Error during authentication: {str(e)}")
         raise
+
+class SyncAnonymousUserRequest(BaseModel):
+    auth_id: str
+
+class SyncAnonymousUserResponse(BaseModel):
+    status: str  # "created", "exists", "error"
+    message: str
+    user_id: Optional[int] = None
+
+@router.post("/sync-anonymous-user", response_model=SyncAnonymousUserResponse)
+async def sync_anonymous_user(
+    request: SyncAnonymousUserRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    同步匿名用户到自定义用户表
+    接收前端传来的 Supabase auth_id，在自定义 users 表中创建对应记录
+    """
+    try:
+        auth_id = request.auth_id
+        
+        # 验证 auth_id 格式（应该是 UUID）
+        if not auth_id or len(auth_id) != 36:
+            return SyncAnonymousUserResponse(
+                status="error",
+                message="Invalid auth_id format"
+            )
+        
+        # 查询是否已经存在该匿名用户
+        existing_user = get_user_by_oauth(db, "supabase", auth_id)
+        
+        if existing_user:
+            logging.info(f"Anonymous user already exists: {existing_user.id}")
+            return SyncAnonymousUserResponse(
+                status="exists",
+                message="Anonymous user already exists",
+                user_id=existing_user.id
+            )
+        
+        # 创建新的匿名用户
+        try:
+            # 为匿名用户生成唯一的 email 和 username
+            unique_identifier = f"anonymous_{auth_id}"
+            
+            user_data = UserCreate(
+                email=unique_identifier,
+                username=unique_identifier,
+                password="",  # 匿名用户不需要密码
+                full_name="Anonymous User",
+                is_active=True,
+                subscription_type="free"
+            )
+            
+            # 创建用户，设置为匿名用户
+            new_user = create_user(
+                db=db,
+                user=user_data,
+                oauth_provider="supabase",
+                oauth_id=auth_id,
+                is_guest=True
+            )
+            
+            # 提交事务
+            db.commit()
+            db.refresh(new_user)
+            
+            logging.info(f"Successfully created anonymous user: {new_user.id} with auth_id: {auth_id}")
+            
+            return SyncAnonymousUserResponse(
+                status="created",
+                message="Anonymous user created successfully",
+                user_id=new_user.id
+            )
+            
+        except Exception as e:
+            # 回滚事务
+            db.rollback()
+            logging.error(f"Error creating anonymous user: {str(e)}")
+            
+            return SyncAnonymousUserResponse(
+                status="error",
+                message=f"Failed to create anonymous user: {str(e)}"
+            )
+    
+    except Exception as e:
+        logging.error(f"Unexpected error in sync_anonymous_user: {str(e)}")
+        return SyncAnonymousUserResponse(
+            status="error",
+            message="Internal server error"
+        )
