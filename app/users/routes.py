@@ -11,17 +11,16 @@ import logging
 import traceback
 from fastapi.encoders import jsonable_encoder
 
-from app.db import SessionLocal
+from app.db import SessionLocal, get_db
 from app.auth.jwt import (
     create_access_token, 
     get_current_active_user,
     get_current_user,
-    get_current_user_optional,
     ACCESS_TOKEN_EXPIRE_MINUTES,
     Token
 )
 from app.auth.oauth import oauth, get_oauth_user
-from app.auth.supabase import get_current_active_supabase_user, verify_supabase_token
+from app.auth.supabase import get_current_active_supabase_user
 from app.users.crud import (
     get_user, 
     get_users, 
@@ -40,23 +39,6 @@ from app.users import crud
 from app.users.schemas import UserCreate, UserResponse, UserUpdate, UserInterests, TermsAcceptanceCreate, TermsAcceptanceResponse
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        # Ping the database to ensure connection is active
-        from sqlalchemy import text
-        db.execute(text("SELECT 1"))
-        yield db
-    except Exception as e:
-        logging.error(f"Database connection error: {str(e)}")
-        # Try to create a new connection
-        db.close()
-        db = SessionLocal()
-        yield db
-    finally:
-        db.close()
 
 # Create an alternative database session for diagnostic use
 def get_fresh_db():
@@ -77,12 +59,12 @@ def get_fresh_db():
 # Dependency to get the current user with support for both JWT and Supabase auth
 async def get_current_user_unified(
     request: Request,
-    jwt_user: Optional[User] = Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
     """
     Get the current user with unified authentication support (JWT and Supabase).
     This dependency is the primary auth entry point that combines both auth methods.
+    OPTIMIZED: Now relies entirely on middleware results to avoid duplicate token verification.
     
     Returns:
         User object if authenticated, None otherwise
@@ -90,43 +72,27 @@ async def get_current_user_unified(
     path = request.url.path
     logging.info(f"[DEBUG] get_current_user_unified called for path: {path}")
     
-    # CRITICAL FIX: Check request.state.user FIRST and return immediately if it's a User object
-    # This bypasses all the problematic dependency chain issues
+    # 🚀 FIRST PRIORITY: Check request.state.user FIRST and return immediately if it's a User object
+    # This comes directly from middleware and avoids any duplicate token verification
     if hasattr(request.state, "user") and isinstance(request.state.user, User):
-        logging.info(f"[DEBUG] IMMEDIATE RETURN: Found User object in request.state.user with ID: {request.state.user.id}")
+        logging.info(f"[DEBUG] ⚡ FAST PATH: Using User object from middleware (ID: {request.state.user.id}) - NO JWT verification needed")
         return request.state.user
     
-    # Add detailed debugging at the very start
-    logging.info(f"[DEBUG] === DETAILED REQUEST STATE DEBUG ===")
-    logging.info(f"[DEBUG] hasattr(request.state, 'user'): {hasattr(request.state, 'user')}")
-    if hasattr(request.state, 'user'):
-        logging.info(f"[DEBUG] request.state.user is None: {request.state.user is None}")
-        logging.info(f"[DEBUG] type(request.state.user): {type(request.state.user)}")
-        if request.state.user is not None:
-            if isinstance(request.state.user, User):
-                logging.info(f"[DEBUG] request.state.user.id: {request.state.user.id}")
-                logging.info(f"[DEBUG] request.state.user.email: {request.state.user.email}")
-            elif isinstance(request.state.user, dict):
-                logging.info(f"[DEBUG] request.state.user dict keys: {request.state.user.keys()}")
-    logging.info(f"[DEBUG] jwt_user from dependency: {jwt_user}")
-    logging.info(f"[DEBUG] === END DETAILED DEBUG ===")
-    
-    # Handle dict user from request.state
+    # If middleware has already verified the user but it's still a dict, convert to User object  
     if hasattr(request.state, "user") and isinstance(request.state.user, dict):
         # Legacy dictionary format, try to convert to a User object
         try:
             user_email = request.state.user.get('email')
-            logging.info(f"[DEBUG] User from request.state.user is a dict with email: {user_email}")
+            logging.info(f"[DEBUG] 🔄 Converting dict user from middleware to User object with email: {user_email}")
             if user_email:
-                # Try with current db session - but catch any JWT auth errors
+                # Try with current db session first
                 try:
                     db_user = get_user_by_email(db, email=user_email)
                     if db_user:
-                        logging.info(f"[DEBUG] Successfully retrieved user from DB by email: {db_user.id}")
+                        logging.info(f"[DEBUG] ✅ Successfully retrieved user from DB by email: {db_user.id}")
                         return db_user
                 except Exception as db_error:
-                    # If DB query fails due to auth issues, create a temporary user
-                    logging.warning(f"[DEBUG] DB lookup failed due to: {str(db_error)}, creating temporary user")
+                    logging.warning(f"[DEBUG] ⚠️ DB lookup failed: {str(db_error)}, creating temporary user")
                     # Create a temporary user from the dict data
                     temp_user = User(
                         id=request.state.user.get("id", 0),
@@ -139,24 +105,24 @@ async def get_current_user_unified(
                     )
                     return temp_user
         except Exception as e:
-            logging.error(f"[DEBUG] Error converting legacy user dict to User: {str(e)}")
+            logging.error(f"[DEBUG] ❌ Error converting middleware user dict to User: {str(e)}")
     
-    # If no user in request.state.user, check for Supabase user data
+    # Check for Supabase user data in request state (from middleware)
     if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-        logging.info(f"[DEBUG] Found Supabase user data in request.state.supabase_user")
+        logging.info(f"[DEBUG] 🟡 Found Supabase user data from middleware")
         email = request.state.supabase_user.get("email")
         if email:
             logging.info(f"[DEBUG] Looking up user with email {email} in database")
             try:
                 db_user = get_user_by_email(db, email=email)
                 if db_user:
-                    logging.info(f"[DEBUG] Found user in database for email {email}: {db_user.id}")
+                    logging.info(f"[DEBUG] ✅ Found user in database for email {email}: {db_user.id}")
                     return db_user
             except Exception as db_error:
-                logging.warning(f"[DEBUG] DB lookup failed for Supabase user due to: {str(db_error)}")
+                logging.warning(f"[DEBUG] ⚠️ DB lookup failed for Supabase user: {str(db_error)}")
             
             # If DB lookup fails or user not found, create temporary user
-            logging.info(f"[DEBUG] Creating temporary user for Supabase email: {email}")
+            logging.info(f"[DEBUG] 🔄 Creating temporary user for Supabase email: {email}")
             supabase_data = request.state.supabase_user
             temp_user = User(
                 id=supabase_data.get("id", 0),
@@ -169,16 +135,9 @@ async def get_current_user_unified(
             )
             return temp_user
     
-    # Fall back to JWT auth only if no middleware user data
-    try:
-        if jwt_user is not None:
-            logging.info(f"[DEBUG] Using user from JWT auth: {jwt_user.id}")
-            return jwt_user
-    except Exception as e:
-        logging.warning(f"[DEBUG] JWT auth failed: {str(e)}")
-    
-    # No valid user found
-    logging.warning(f"[DEBUG] No authenticated user found for {request.url.path}")
+    # 🚫 NO JWT FALLBACK: We no longer fall back to JWT auth to avoid duplicate verification
+    # If middleware didn't provide user data, it means there's no valid authentication
+    logging.warning(f"[DEBUG] ❌ No authenticated user found for {request.url.path} - middleware provided no user data")
     return None  # Return None instead of raising an exception, let the active user dependency handle it
 
 # Dependency to get the current active user with unified auth
@@ -190,6 +149,7 @@ async def get_current_active_user_unified(
     """
     Check if the current user is active.
     Works with both JWT and Supabase authentication.
+    OPTIMIZED: Relies entirely on middleware results to avoid duplicate token verification.
     """
     path = request.url.path
     logging.info(f"[DEBUG] get_current_active_user_unified called for path: {path}")
@@ -199,9 +159,9 @@ async def get_current_active_user_unified(
         logging.info("[DEBUG] OPTIONS request detected, skipping auth check")
         return None
     
-    # CRITICAL FIX: Check request.state.user FIRST and use it directly if it's a User object
+    # 🚀 FIRST PRIORITY: Always check request.state.user FIRST
     if hasattr(request.state, "user") and isinstance(request.state.user, User):
-        logging.info(f"[DEBUG] IMMEDIATE RETURN from get_current_active_user_unified: Using User object from request.state: {request.state.user.id}")
+        logging.info(f"[DEBUG] ⚡ FAST PATH: Using User object from middleware (ID: {request.state.user.id})")
         # Check if the user is active
         if not request.state.user.is_active:
             logging.error(f"[DEBUG] User {request.state.user.id} is not active")
@@ -211,24 +171,9 @@ async def get_current_active_user_unified(
             )
         return request.state.user
     
-    # Immediate debug of the current_user parameter
-    logging.info(f"[DEBUG] === ACTIVE USER UNIFIED DEBUG ===")
-    logging.info(f"[DEBUG] current_user parameter type: {type(current_user)}")
-    logging.info(f"[DEBUG] current_user is None: {current_user is None}")
+    # Second priority: Use current_user from the dependency chain if it exists
     if current_user is not None:
-        logging.info(f"[DEBUG] current_user.id: {current_user.id}")
-        logging.info(f"[DEBUG] current_user.email: {current_user.email}")
-    
-    # Check request.state directly
-    logging.info(f"[DEBUG] Has user in request.state: {hasattr(request.state, 'user')}")
-    if hasattr(request.state, "user"):
-        logging.info(f"[DEBUG] Type of request.state.user: {type(request.state.user)}")
-        if isinstance(request.state.user, User):
-            logging.info(f"[DEBUG] request.state.user is a User object with ID: {request.state.user.id}")
-    logging.info(f"[DEBUG] === END ACTIVE USER DEBUG ===")
-        
-    # If we have a current_user from the dependency, use it
-    if current_user is not None:
+        logging.info(f"[DEBUG] Using current_user from dependency chain: {current_user.id}")
         # Check if the user is active
         if not current_user.is_active:
             logging.error(f"[DEBUG] User {current_user.id} is not active")
@@ -236,47 +181,10 @@ async def get_current_active_user_unified(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Inactive user"
             )
-        logging.info(f"[DEBUG] User {current_user.id} is authenticated and active for {path}")
         return current_user
     
-    # If current_user is None but we have user data in request.state, try to use it
-    if hasattr(request.state, "user") and request.state.user is not None:
-        logging.info("[DEBUG] Retrieving user from request.state that was lost in the dependency chain")
-        
-        # If it's a dict, create a temporary user
-        if isinstance(request.state.user, dict) and 'email' in request.state.user:
-            email = request.state.user.get('email')
-            logging.info(f"[DEBUG] Creating temporary user from request.state dict with email: {email}")
-            temp_user = User(
-                id=request.state.user.get("id", 0),
-                email=email,
-                username=email.split("@")[0],
-                full_name=request.state.user.get("full_name", ""),
-                is_active=True,
-                oauth_provider="supabase",
-                subscription_type="free"
-            )
-            return temp_user
-    
-    # Check for Supabase user data in request state
-    if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-        email = request.state.supabase_user.get("email")
-        if email:
-            logging.info(f"[DEBUG] Creating temporary user from Supabase data with email: {email}")
-            supabase_data = request.state.supabase_user
-            temp_user = User(
-                id=supabase_data.get("id", 0),
-                email=email,
-                username=email.split("@")[0],
-                full_name=supabase_data.get("name", ""),
-                is_active=True,
-                oauth_provider="supabase",
-                subscription_type="free"
-            )
-            return temp_user
-    
     # If we still don't have a user at this point, authentication has failed
-    logging.warning(f"[DEBUG] All authentication fallbacks failed for {request.url.path}")
+    logging.warning(f"[DEBUG] No authenticated user found for {request.url.path}")
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",
@@ -312,33 +220,100 @@ async def read_users_me(
     logging.info(f"Request method for /users/me: {request.method}")
     logging.info(f"Authorization header present: {request.headers.get('Authorization') is not None}")
     
-    # Check for direct access to user from request.state for debugging
-    if hasattr(request.state, "user"):
-        logging.info(f"Has user in request.state: {hasattr(request.state, 'user')}")
-        user_type = type(request.state.user)
-        logging.info(f"Type of request.state.user: {user_type}")
-        if isinstance(request.state.user, User):
-            logging.info(f"User ID in request.state.user: {request.state.user.id}")
-            # CRITICAL FIX: Always use the User object from request.state if it's available
-            # This ensures we don't lose the user object due to session issues
-            current_user = request.state.user
-            logging.info(f"CRITICAL FIX: Using User object from request.state.user: {current_user.id}")
-    
-    # First and most important check: if we already have a User object from the dependency
+    # 🔍 DEBUG: 详细检查当前用户数据
     if current_user:
-        logging.info(f"Using current_user from dependency: {current_user.id}")
-        user_data = jsonable_encoder(current_user)
-        response = JSONResponse(content=user_data)
+        logging.info(f"🔍 [/users/me] current_user found: ID={current_user.id}")
+        logging.info(f"🔍 [/users/me] current_user.email: '{current_user.email}'")
+        logging.info(f"🔍 [/users/me] current_user.username: '{current_user.username}'")
+        logging.info(f"🔍 [/users/me] current_user.full_name: '{current_user.full_name}'")
+        logging.info(f"🔍 [/users/me] current_user.is_guest: {getattr(current_user, 'is_guest', 'N/A')}")
+        logging.info(f"🔍 [/users/me] current_user.oauth_provider: '{current_user.oauth_provider}'")
+        logging.info(f"🔍 [/users/me] current_user.oauth_id: '{current_user.oauth_id}'")
+    else:
+        logging.error("🔍 [/users/me] current_user is None!")
         
-        # Add CORS headers directly
-        origin = request.headers.get("Origin", "http://localhost:3000")
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+    # Check for direct access to user from request.state for comparison
+    if hasattr(request.state, "user"):
+        user_state_obj = request.state.user
+        logging.info(f"🔍 [/users/me] request.state.user type: {type(user_state_obj)}")
+        if isinstance(user_state_obj, User):
+            logging.info(f"🔍 [/users/me] request.state.user ID: {user_state_obj.id}")
+            logging.info(f"🔍 [/users/me] request.state.user.email: '{user_state_obj.email}'")
+            logging.info(f"🔍 [/users/me] request.state.user.username: '{user_state_obj.username}'")
+            
+            # 🔧 CRITICAL: Only use request.state.user if it has complete data
+            # Check if the data is more complete than current_user
+            if (current_user is None or 
+                (user_state_obj.email and not current_user.email) or
+                (user_state_obj.username and not current_user.username)):
+                logging.info(f"🔧 [/users/me] Using request.state.user as it has more complete data")
+                current_user = user_state_obj
+            elif current_user and current_user.email and current_user.username:
+                logging.info(f"🔧 [/users/me] current_user has complete data, using it instead of request.state.user")
+            else:
+                logging.warning(f"🔧 [/users/me] Both sources have incomplete data, proceeding with current_user")
+    
+    # Final validation: if we have a user, make sure they have basic required data
+    if current_user:
+        logging.info(f"🔍 [/users/me] Final user validation before serialization:")
+        logging.info(f"🔍 [/users/me] - ID: {current_user.id}")
+        logging.info(f"🔍 [/users/me] - Email: '{current_user.email}' (empty: {not current_user.email})")
+        logging.info(f"🔍 [/users/me] - Username: '{current_user.username}' (None: {current_user.username is None})")
+        logging.info(f"🔍 [/users/me] - Full name: '{current_user.full_name}' (None: {current_user.full_name is None})")
         
-        return response
+        # If user data is incomplete, try to refresh from database
+        if not current_user.email or not current_user.username:
+            logging.warning(f"🔧 [/users/me] User data is incomplete, attempting to refresh from database")
+            try:
+                from app.db import SessionLocal
+                db = SessionLocal()
+                try:
+                    # Try to get user by oauth_id first (more reliable for Supabase users)
+                    if current_user.oauth_id:
+                        from app.users.crud import get_user_by_oauth
+                        db_user = get_user_by_oauth(db, current_user.oauth_provider, current_user.oauth_id)
+                        if db_user:
+                            logging.info(f"🔧 [/users/me] Found user in DB by oauth_id: {db_user.id}")
+                            current_user = db_user
+                    # Fallback to lookup by ID
+                    elif hasattr(current_user, 'id') and current_user.id:
+                        from app.users.crud import get_user
+                        db_user = get_user(db, current_user.id)
+                        if db_user:
+                            logging.info(f"🔧 [/users/me] Found user in DB by ID: {db_user.id}")
+                            current_user = db_user
+                finally:
+                    db.close()
+            except Exception as e:
+                logging.error(f"🔧 [/users/me] Error refreshing user from database: {str(e)}")
+        
+        # Serialize and return the user data
+        try:
+            user_data = jsonable_encoder(current_user)
+            logging.info(f"🔍 [/users/me] Successfully serialized user data:")
+            logging.info(f"🔍 [/users/me] - Serialized email: '{user_data.get('email', 'MISSING')}'")
+            logging.info(f"🔍 [/users/me] - Serialized username: '{user_data.get('username', 'MISSING')}'")
+            logging.info(f"🔍 [/users/me] - Serialized full_name: '{user_data.get('full_name', 'MISSING')}'")
+            
+            response = JSONResponse(content=user_data)
+            
+            # Add CORS headers directly
+            origin = request.headers.get("Origin", "http://localhost:3000")
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            
+            return response
+        except Exception as e:
+            logging.error(f"🔍 [/users/me] Error serializing user data: {str(e)}")
+            import traceback
+            logging.error(f"🔍 [/users/me] Serialization traceback: {traceback.format_exc()}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to serialize user data: {str(e)}"
+            )
     
     # If we reach here, authentication has failed
-    logging.error("All authentication methods failed for /users/me")
+    logging.error("🔍 [/users/me] All authentication methods failed")
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication failed",
@@ -357,56 +332,9 @@ async def update_user_me(
         logging.info(f"Request method: {request.method}")
         logging.info(f"Authorization header present: {request.headers.get('Authorization') is not None}")
         
-        # First check: If current_user is None, try to retrieve from request.state
+        # 🚀 OPTIMIZATION: Rely entirely on middleware results
         if current_user is None:
-            logging.warning("Current user is None, attempting to recover from request.state")
-            
-            if hasattr(request.state, "user") and request.state.user is not None:
-                logging.info("Found user in request.state.user")
-                
-                if isinstance(request.state.user, User):
-                    logging.info(f"Using User object from request.state.user: {request.state.user.id}")
-                    current_user = request.state.user
-                elif isinstance(request.state.user, dict) and 'email' in request.state.user:
-                    email = request.state.user.get('email')
-                    logging.info(f"Looking up user by email from request.state.user dict: {email}")
-                    db_user = get_user_by_email(db, email=email)
-                    if db_user:
-                        logging.info(f"Found user in database for email {email}: {db_user.id}")
-                        current_user = db_user
-                    else:
-                        logging.warning(f"User lookup failed: User with email {email} not found in database")
-            
-            # Check for Supabase data if we still don't have a user
-            if current_user is None and hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-                email = request.state.supabase_user.get("email")
-                if email:
-                    logging.info(f"Looking up user with email {email} from Supabase data")
-                    db_user = get_user_by_email(db, email=email)
-                    if db_user:
-                        logging.info(f"Found user in database: {db_user.id}")
-                        current_user = db_user
-            
-            # Last resort: Direct token verification
-            if current_user is None:
-                auth_header = request.headers.get("Authorization")
-                if auth_header and auth_header.startswith("Bearer "):
-                    try:
-                        logging.info("Attempting direct token verification")
-                        supabase_user = await verify_supabase_token(request)
-                        if supabase_user and "email" in supabase_user:
-                            email = supabase_user.get("email")
-                            logging.info(f"Direct verification found email: {email}")
-                            
-                            db_user = get_user_by_email(db, email=email)
-                            if db_user:
-                                logging.info(f"Found user via direct verification: {db_user.id}")
-                                current_user = db_user
-                    except Exception as e:
-                        logging.error(f"Direct verification failed: {str(e)}")
-        
-        if current_user is None:
-            logging.error("Failed to recover user for update")
+            logging.error("No authenticated user found - middleware should have provided user")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authentication required",
@@ -604,113 +532,14 @@ async def get_user_subscription_info(
     logging.info(f"[DEBUG] /subscription endpoint called with path: {request.url.path}")
     logging.info(f"[DEBUG] User authenticated: {current_user.id if current_user else None}")
     
-    # CRITICAL FIX: Direct check for User object in request.state.user
-    if current_user is None and hasattr(request.state, "user") and isinstance(request.state.user, User):
-        logging.info(f"[DEBUG] CRITICAL FIX: Using User object directly from request.state: {request.state.user.id}")
-        current_user = request.state.user
-    
-    # Extra verification that current_user is valid
+    # 🚀 OPTIMIZATION: Rely entirely on middleware and dependency injection
     if not current_user:
-        logging.error(f"[DEBUG] User is None in subscription endpoint after dependency check")
-        
-        # First check: If current_user is None, try to retrieve from request.state
-        if hasattr(request.state, "user") and request.state.user is not None:
-            logging.warning(f"[DEBUG] Attempting to recover user from request.state in subscription endpoint")
-            if isinstance(request.state.user, User):
-                current_user = request.state.user
-                logging.info(f"[DEBUG] Recovered User model from request.state.user with ID: {current_user.id}")
-            elif isinstance(request.state.user, dict) and "id" in request.state.user:
-                # Try to look up the user in the database first
-                if "email" in request.state.user:
-                    email = request.state.user.get("email")
-                    logging.info(f"[DEBUG] Looking up user by email from dict: {email}")
-                    db_user = get_user_by_email(db, email=email)
-                    if db_user:
-                        logging.info(f"[DEBUG] Found user in database: {db_user.id}")
-                        current_user = db_user
-                    else:
-                        # Create a temporary user with default subscription
-                        user_id = request.state.user.get("id")
-                        logging.info(f"[DEBUG] Creating temporary user from dict with ID: {user_id}")
-                        current_user = User(
-                            id=user_id, 
-                            email=email,
-                            username=email.split("@")[0],
-                            is_active=True,
-                            subscription_type="free"
-                        )
-                else:
-                    # Create a temporary user with default subscription
-                    user_id = request.state.user.get("id")
-                    email = request.state.user.get("email", "user@example.com")
-                    logging.info(f"[DEBUG] Creating temporary user from dict with ID: {user_id}")
-                    current_user = User(
-                        id=user_id, 
-                        email=email,
-                        username=email.split("@")[0],
-                        is_active=True,
-                        subscription_type="free"
-                    )
-        
-        # Check for Supabase data if we still don't have a user
-        if not current_user and hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-            email = request.state.supabase_user.get("email")
-            if email:
-                logging.info(f"[DEBUG] Looking up user with email {email} from Supabase data")
-                db_user = get_user_by_email(db, email=email)
-                if db_user:
-                    logging.info(f"[DEBUG] Found user in database: {db_user.id}")
-                    current_user = db_user
-                else:
-                    # Create a temporary user with default subscription
-                    supabase_data = request.state.supabase_user
-                    user_id = supabase_data.get("id", "temp-id")
-                    logging.info(f"[DEBUG] Creating temporary user from Supabase data with ID: {user_id}")
-                    current_user = User(
-                        id=user_id, 
-                        email=email,
-                        username=email.split("@")[0],
-                        is_active=True,
-                        subscription_type="free"
-                    )
-        
-        # Last resort: Direct token verification
-        if not current_user:
-            auth_header = request.headers.get("Authorization")
-            if auth_header and auth_header.startswith("Bearer "):
-                try:
-                    logging.info("[DEBUG] Attempting direct token verification for subscription")
-                    supabase_user = await verify_supabase_token(request)
-                    if supabase_user and "email" in supabase_user:
-                        email = supabase_user.get("email")
-                        logging.info(f"[DEBUG] Direct verification found email: {email}")
-                        
-                        db_user = get_user_by_email(db, email=email)
-                        if db_user:
-                            logging.info(f"[DEBUG] Found user via direct verification: {db_user.id}")
-                            current_user = db_user
-                        else:
-                            # Create a temporary user with default subscription
-                            user_id = supabase_user.get("id", "temp-id")
-                            logging.info(f"[DEBUG] Creating temporary user from token data with ID: {user_id}")
-                            current_user = User(
-                                id=user_id, 
-                                email=email,
-                                username=email.split("@")[0],
-                                is_active=True,
-                                subscription_type="free"
-                            )
-                except Exception as e:
-                    logging.error(f"[DEBUG] Direct verification failed: {str(e)}")
-        
-        # If we still don't have a user, raise 401
-        if not current_user:
-            logging.error(f"[DEBUG] Failed to recover user in subscription endpoint")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required",
-                headers={"WWW-Authenticate": "Bearer"}
-            )
+        logging.error(f"[DEBUG] No authenticated user found for subscription endpoint")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
     # Get subscription type, default to 'free' if not set
     subscription = current_user.subscription_type or 'free'
@@ -917,15 +746,8 @@ async def read_users_me_direct(
     """Direct access to user data without going through the authentication dependency"""
     logging.info("=== DIRECT BYPASS ENDPOINT CALLED ===")
     
-    # Check for auth header
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="No valid Authorization header"
-        )
-    
-    # First try to get user from request state
+    # 🚀 OPTIMIZATION: Only rely on middleware results
+    # First try to get user from request state (from middleware)
     if hasattr(request.state, "user") and request.state.user is not None:
         if isinstance(request.state.user, User):
             logging.info(f"Direct route: Found User object in request.state.user: {request.state.user.id}")
@@ -938,56 +760,24 @@ async def read_users_me_direct(
                 if user:
                     return user
     
-    # Otherwise try direct token verification
-    try:
-        supabase_user = await verify_supabase_token(request)
-        if supabase_user and "email" in supabase_user:
-            email = supabase_user.get("email")
-            logging.info(f"Direct route: Got email from token: {email}")
+    # Check for Supabase user data from middleware
+    if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+        email = request.state.supabase_user.get("email")
+        if email:
+            logging.info(f"Direct route: Got email from middleware: {email}")
             
             # Look up user in database
             user = get_user_by_email(db, email=email)
             if user:
                 logging.info(f"Direct route: Found user in database: {user.id}")
                 return user
-            else:
-                # Auto-create user
-                logging.info(f"Direct route: Creating new user for {email}")
-                
-                # Generate username from email
-                username = email.split("@")[0]
-                
-                # Create user data
-                user_data = UserCreate(
-                    email=email,
-                    username=username,
-                    password="",  # No password for Supabase users
-                    full_name=supabase_user.get("name", ""),
-                    is_active=True
-                )
-                
-                # Create the user
-                new_user = create_user(
-                    db=db,
-                    user=user_data,
-                    oauth_provider="supabase",
-                    oauth_id=supabase_user.get("id"),
-                    profile_picture=supabase_user.get("avatar_url", "")
-                )
-                
-                # Commit changes
-                db.commit()
-                
-                logging.info(f"Direct route: Created new user: {new_user.id}")
-                return new_user
-    except Exception as e:
-        logging.error(f"Direct route error: {str(e)}")
     
     # If we reached here, authentication failed
+    logging.error("Direct route: No user data found from middleware")
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication failed in direct route"
-    ) 
+        detail="Authentication failed - no user data from middleware"
+    )
 
 @router.get("/debug/auth", response_model=dict)
 async def debug_authentication(request: Request):
@@ -1045,76 +835,29 @@ async def debug_authentication(request: Request):
         "state_dir": dir(request.state)
     }
     
-    # Try to verify token directly
+    # Token verification
     if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
         try:
-            supabase_user = await verify_supabase_token(request)
-            if supabase_user:
-                results["token_verification"] = "success"
-                results["token_user_id"] = supabase_user.get("id")
-                results["token_email"] = supabase_user.get("email")
-                
-                # Check if user exists in database
-                db = SessionLocal()
-                try:
-                    email = supabase_user.get("email")
-                    if email:
-                        db_user = get_user_by_email(db, email=email)
-                        if db_user:
-                            results["database_user_found"] = True
-                            results["database_user_id"] = db_user.id
-                            results["database_user_email"] = db_user.email
-                            results["database_user_active"] = db_user.is_active
-                            
-                            # Test if the user object can be serialized
-                            try:
-                                import json
-                                from datetime import datetime, date
-                                
-                                def json_serial(obj):
-                                    """JSON serializer for objects not serializable by default"""
-                                    if isinstance(obj, (datetime, date)):
-                                        return obj.isoformat()
-                                    return str(obj)
-                                
-                                # Try to serialize the user object
-                                user_dict = {c.name: getattr(db_user, c.name) for c in db_user.__table__.columns}
-                                json.dumps(user_dict, default=json_serial)
-                                results["user_serializable"] = True
-                            except Exception as e:
-                                results["user_serializable"] = False
-                                results["serialization_error"] = str(e)
-                        else:
-                            results["database_user_found"] = False
-                            
-                            # Test if we can create the user automatically
-                            try:
-                                # Generate username from email
-                                username = email.split("@")[0]
-                                
-                                # Mock user creation (don't actually create)
-                                results["could_create_user"] = True
-                                results["would_create_with"] = {
-                                    "email": email,
-                                    "username": username,
-                                    "oauth_provider": "supabase",
-                                    "oauth_id": supabase_user.get("id")
-                                }
-                            except Exception as e:
-                                results["could_create_user"] = False
-                                results["creation_error"] = str(e)
-                finally:
-                    db.close()
+            results["token_verification"] = "attempting"
+            # 🚀 OPTIMIZATION: Use middleware results instead of re-verifying token
+            if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+                supabase_user = request.state.supabase_user
+                results["token_verification"] = "success_from_middleware"
+                results["token_user"] = {
+                    "id": supabase_user.get("id"),
+                    "email": supabase_user.get("email")
+                }
             else:
-                results["token_verification"] = "failed"
+                # If middleware didn't provide data, token verification failed
+                results["token_verification"] = "no_middleware_data"
         except Exception as e:
             results["token_verification"] = "error"
-            results["token_error"] = str(e)
             
             # Get full error traceback
             import traceback
             results["token_error_traceback"] = traceback.format_exc()
+    else:
+        results["token_verification"] = "no_token"
     
     # Test db connection
     try:
@@ -1292,182 +1035,64 @@ async def diagnostic_auth_info(
         elif isinstance(request.state.user, dict):
             results["request_state"]["user_type"] = "Dictionary"
             results["request_state"]["user_dict"] = request.state.user
+            
+            # If the dict has an email, check the database
+            if "email" in request.state.user:
+                email = request.state.user.get("email")
+                results["auth_flow"].append(f"User dict has email: {email}, checking database")
+                results["database_checks"].append({
+                    "step": "Lookup from request.state.user dict",
+                    "email": email
+                })
+                
+                db_user = get_user_by_email(db, email=email)
+                if db_user:
+                    results["auth_flow"].append(f"Found user in database with email {email}")
+                    results["database_checks"][-1]["found"] = True
+                    results["database_checks"][-1]["user_id"] = db_user.id
+                else:
+                    results["auth_flow"].append(f"User with email {email} not found in database")
+                    results["database_checks"][-1]["found"] = False
         else:
+            results["auth_flow"].append(f"User in request.state is of unexpected type: {type(request.state.user)}")
             results["request_state"]["user_type"] = str(type(request.state.user))
+    else:
+        results["auth_flow"].append("No user found in request.state.user")
     
     if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-        results["request_state"]["supabase_user_keys"] = list(request.state.supabase_user.keys())
-        results["request_state"]["supabase_user_email"] = request.state.supabase_user.get("email")
+        results["request_state"]["has_supabase_user"] = True
+        supabase_user = request.state.supabase_user
+        if supabase_user is None:
+            results["request_state"]["supabase_user"] = "None"
+        else:
+            results["request_state"]["supabase_user"] = supabase_user
+    else:
+        results["request_state"]["has_supabase_user"] = False
     
     # Check auth header
     auth_header = request.headers.get("Authorization")
     results["auth_header"]["present"] = auth_header is not None
     results["auth_header"]["type"] = "Bearer" if auth_header and auth_header.startswith("Bearer ") else "None/Unknown"
     
-    # Database checks
-    if hasattr(request.state, "user") and isinstance(request.state.user, dict) and "email" in request.state.user:
-        email = request.state.user.get("email")
-        results["db_checks"]["request_state_user_dict_email"] = email
-        try:
-            db_user = get_user_by_email(db, email=email)
-            results["db_checks"]["user_found_by_email"] = db_user is not None
-            if db_user:
-                results["db_checks"]["db_user_id"] = db_user.id
-                results["db_checks"]["db_user_is_active"] = db_user.is_active
-        except Exception as e:
-            results["db_checks"]["error_looking_up_user"] = str(e)
-    
-    if hasattr(request.state, "supabase_user") and "email" in request.state.supabase_user:
-        email = request.state.supabase_user.get("email")
-        results["db_checks"]["supabase_user_email"] = email
-        try:
-            db_user = get_user_by_email(db, email=email)
-            results["db_checks"]["supabase_user_found_in_db"] = db_user is not None
-            if db_user:
-                results["db_checks"]["supabase_db_user_id"] = db_user.id
-                results["db_checks"]["supabase_db_user_is_active"] = db_user.is_active
-        except Exception as e:
-            results["db_checks"]["error_looking_up_supabase_user"] = str(e)
-    
     # Token verification
     if auth_header and auth_header.startswith("Bearer "):
         try:
-            supabase_user = await verify_supabase_token(request)
-            results["token_verification"]["success"] = supabase_user is not None
-            if supabase_user:
-                results["token_verification"]["user_id"] = supabase_user.get("id")
-                results["token_verification"]["email"] = supabase_user.get("email")
+            results["token_verification"] = "attempting"
+            # 🚀 OPTIMIZATION: Use middleware results instead of re-verifying token
+            if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+                supabase_user = request.state.supabase_user
+                result["auth_flow"].append("Token verification successful - using middleware data")
+                result["token_verification"]["verified"] = True
+                result["token_verification"]["user_id"] = supabase_user.get("id")
+                result["token_verification"]["email"] = supabase_user.get("email")
+                result["token_verification"]["user_data"] = supabase_user
                 
-                # Check if user exists in database
-                db = SessionLocal()
-                try:
-                    email = supabase_user.get("email")
-                    if email:
-                        db_user = get_user_by_email(db, email=email)
-                        if db_user:
-                            results["database_user_found"] = True
-                            results["database_user_id"] = db_user.id
-                            results["database_user_email"] = db_user.email
-                            results["database_user_active"] = db_user.is_active
-                            
-                            # Test if the user object can be serialized
-                            try:
-                                import json
-                                from datetime import datetime, date
-                                
-                                def json_serial(obj):
-                                    """JSON serializer for objects not serializable by default"""
-                                    if isinstance(obj, (datetime, date)):
-                                        return obj.isoformat()
-                                    return str(obj)
-                                
-                                # Try to serialize the user object
-                                user_dict = {c.name: getattr(db_user, c.name) for c in db_user.__table__.columns}
-                                json.dumps(user_dict, default=json_serial)
-                                results["user_serializable"] = True
-                            except Exception as e:
-                                results["user_serializable"] = False
-                                results["serialization_error"] = str(e)
-                        else:
-                            results["database_user_found"] = False
-                            
-                            # Test if we can create the user automatically
-                            try:
-                                # Generate username from email
-                                username = email.split("@")[0]
-                                
-                                # Mock user creation (don't actually create)
-                                results["could_create_user"] = True
-                                results["would_create_with"] = {
-                                    "email": email,
-                                    "username": username,
-                                    "oauth_provider": "supabase",
-                                    "oauth_id": supabase_user.get("id")
-                                }
-                            except Exception as e:
-                                results["could_create_user"] = False
-                                results["creation_error"] = str(e)
-                finally:
-                    db.close()
-            else:
-                results["token_verification"] = "failed"
-        except Exception as e:
-            results["token_verification"] = "error"
-            results["token_error"] = str(e)
-            
-            # Get full error traceback
-            import traceback
-            results["token_error_traceback"] = traceback.format_exc()
-    
-    # Check environment variables
-    results["supabase_url_configured"] = os.getenv("SUPABASE_URL") is not None
-    results["supabase_key_configured"] = os.getenv("SUPABASE_KEY") is not None
-    
-    # Add server timestamp
-    from datetime import datetime
-    results["server_timestamp"] = datetime.utcnow().isoformat()
-    
-    return results 
-
-@router.get("/auth-diagnostics", response_model=dict)
-async def detailed_auth_diagnostics(request: Request, db: Session = Depends(get_db)):
-    """
-    Detailed diagnostic endpoint for authentication issues.
-    This captures the complete authentication flow step-by-step.
-    """
-    result = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "request_info": {
-            "path": request.url.path,
-            "method": request.method,
-            "headers": {k: v for k, v in request.headers.items() 
-                      if k.lower() not in ['authorization', 'cookie', 'x-api-key']}
-        },
-        "auth_flow": [],
-        "request_state": {},
-        "database_checks": [],
-        "token_verification": {},
-        "user_data": {},
-        "middleware_data": {},
-        "errors": []
-    }
-    
-    # Step 1: Check request.state for user data
-    result["auth_flow"].append("Checking request.state for user data")
-    try:
-        result["request_state"]["has_user"] = hasattr(request.state, "user")
-        result["request_state"]["has_supabase_user"] = hasattr(request.state, "supabase_user")
-        result["request_state"]["state_attributes"] = dir(request.state)
-        
-        if hasattr(request.state, "user") and request.state.user is not None:
-            result["auth_flow"].append("User found in request.state.user")
-            if isinstance(request.state.user, User):
-                result["auth_flow"].append("User in request.state is a User model")
-                result["request_state"]["user_type"] = "User model"
-                result["request_state"]["user_id"] = request.state.user.id
-                result["request_state"]["user_email"] = request.state.user.email
-                result["request_state"]["user_is_active"] = request.state.user.is_active
-                
-                # Attempt to serialize User model to verify it's valid
-                try:
-                    from fastapi.encoders import jsonable_encoder
-                    user_data = jsonable_encoder(request.state.user)
-                    result["request_state"]["user_serializable"] = True
-                    result["user_data"] = user_data
-                except Exception as e:
-                    result["request_state"]["user_serializable"] = False
-                    result["request_state"]["serialization_error"] = str(e)
-            elif isinstance(request.state.user, dict):
-                result["auth_flow"].append("User in request.state is a dict")
-                result["request_state"]["user_type"] = "dict"
-                result["request_state"]["user_dict"] = request.state.user
-                
-                # If the dict has an email, check the database
-                if "email" in request.state.user:
-                    email = request.state.user.get("email")
-                    result["auth_flow"].append(f"User dict has email: {email}, checking database")
+                # Check database for this user
+                email = supabase_user.get("email")
+                if email:
+                    result["auth_flow"].append(f"Token has email: {email}, checking database")
                     result["database_checks"].append({
-                        "step": "Lookup from request.state.user dict",
+                        "step": "Lookup from token verification",
                         "email": email
                     })
                     
@@ -1476,114 +1101,32 @@ async def detailed_auth_diagnostics(request: Request, db: Session = Depends(get_
                         result["auth_flow"].append(f"Found user in database with email {email}")
                         result["database_checks"][-1]["found"] = True
                         result["database_checks"][-1]["user_id"] = db_user.id
+                        
+                        # Try to serialize the user for verification
+                        try:
+                            from fastapi.encoders import jsonable_encoder
+                            user_data = jsonable_encoder(db_user)
+                            result["database_checks"][-1]["serializable"] = True
+                            if not result.get("user_data"):
+                                result["user_data"] = user_data
+                        except Exception as e:
+                            result["database_checks"][-1]["serializable"] = False
+                            result["database_checks"][-1]["serialization_error"] = str(e)
                     else:
                         result["auth_flow"].append(f"User with email {email} not found in database")
                         result["database_checks"][-1]["found"] = False
             else:
-                result["auth_flow"].append(f"User in request.state is of unexpected type: {type(request.state.user)}")
-                result["request_state"]["user_type"] = str(type(request.state.user))
-        else:
-            result["auth_flow"].append("No user found in request.state.user")
-        
-        if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-            result["auth_flow"].append("Supabase user data found in request.state.supabase_user")
-            result["request_state"]["supabase_user_data"] = request.state.supabase_user
-            
-            # If supabase_user has an email, check the database
-            if "email" in request.state.supabase_user:
-                email = request.state.supabase_user.get("email")
-                result["auth_flow"].append(f"Supabase user has email: {email}, checking database")
-                result["database_checks"].append({
-                    "step": "Lookup from request.state.supabase_user",
-                    "email": email
-                })
-                
-                db_user = get_user_by_email(db, email=email)
-                if db_user:
-                    result["auth_flow"].append(f"Found user in database with email {email}")
-                    result["database_checks"][-1]["found"] = True
-                    result["database_checks"][-1]["user_id"] = db_user.id
-                else:
-                    result["auth_flow"].append(f"User with email {email} not found in database")
-                    result["database_checks"][-1]["found"] = False
-        else:
-            result["auth_flow"].append("No supabase user data found in request.state.supabase_user")
-    except Exception as e:
-        result["auth_flow"].append(f"Error checking request.state: {str(e)}")
-        result["errors"].append({
-            "step": "request_state_check",
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        })
-    
-    # Step 2: Check Authorization header and verify token
-    auth_header = request.headers.get("Authorization")
-    result["auth_flow"].append("Checking Authorization header")
-    if auth_header:
-        if auth_header.startswith("Bearer "):
-            result["auth_flow"].append("Bearer token found in Authorization header")
-            result["token_verification"]["has_token"] = True
-            
-            # Get token preview (first 10 chars)
-            token = auth_header.split(" ")[1]
-            token_preview = token[:10] + "..." if len(token) > 10 else token
-            result["token_verification"]["token_preview"] = token_preview
-            
-            # Try to verify the token
-            try:
-                result["auth_flow"].append("Attempting to verify token")
-                supabase_user = await verify_supabase_token(request)
-                
-                if supabase_user:
-                    result["auth_flow"].append("Token verification successful")
-                    result["token_verification"]["verified"] = True
-                    result["token_verification"]["user_id"] = supabase_user.get("id")
-                    result["token_verification"]["email"] = supabase_user.get("email")
-                    result["token_verification"]["user_data"] = supabase_user
-                    
-                    # Check database for this user
-                    email = supabase_user.get("email")
-                    if email:
-                        result["auth_flow"].append(f"Token has email: {email}, checking database")
-                        result["database_checks"].append({
-                            "step": "Lookup from token verification",
-                            "email": email
-                        })
-                        
-                        db_user = get_user_by_email(db, email=email)
-                        if db_user:
-                            result["auth_flow"].append(f"Found user in database with email {email}")
-                            result["database_checks"][-1]["found"] = True
-                            result["database_checks"][-1]["user_id"] = db_user.id
-                            
-                            # Try to serialize the user for verification
-                            try:
-                                from fastapi.encoders import jsonable_encoder
-                                user_data = jsonable_encoder(db_user)
-                                result["database_checks"][-1]["serializable"] = True
-                                if not result.get("user_data"):
-                                    result["user_data"] = user_data
-                            except Exception as e:
-                                result["database_checks"][-1]["serializable"] = False
-                                result["database_checks"][-1]["serialization_error"] = str(e)
-                        else:
-                            result["auth_flow"].append(f"User with email {email} not found in database")
-                            result["database_checks"][-1]["found"] = False
-                else:
-                    result["auth_flow"].append("Token verification failed")
-                    result["token_verification"]["verified"] = False
-            except Exception as e:
-                result["auth_flow"].append(f"Error verifying token: {str(e)}")
+                result["auth_flow"].append("Token verification failed - no middleware data")
                 result["token_verification"]["verified"] = False
-                result["token_verification"]["error"] = str(e)
-                result["errors"].append({
-                    "step": "token_verification",
-                    "error": str(e),
-                    "traceback": traceback.format_exc()
-                })
-        else:
-            result["auth_flow"].append("Authorization header does not contain a Bearer token")
-            result["token_verification"]["has_token"] = False
+        except Exception as e:
+            result["auth_flow"].append(f"Error verifying token: {str(e)}")
+            result["token_verification"]["verified"] = False
+            result["token_verification"]["error"] = str(e)
+            result["errors"].append({
+                "step": "token_verification",
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            })
     else:
         result["auth_flow"].append("No Authorization header found")
         result["token_verification"]["has_token"] = False
@@ -1592,7 +1135,7 @@ async def detailed_auth_diagnostics(request: Request, db: Session = Depends(get_
     result["auth_flow"].append("Testing authentication dependency chain")
     try:
         result["auth_flow"].append("Calling get_current_user_unified")
-        user_from_unified = await get_current_user_unified(request, None, db)
+        user_from_unified = await get_current_user_unified(request, db)
         
         if user_from_unified:
             result["auth_flow"].append(f"get_current_user_unified returned user: {user_from_unified.id}")
@@ -1749,18 +1292,17 @@ async def direct_auth_check(request: Request):
     if auth_header and auth_header.startswith("Bearer "):
         try:
             result["token_verification"] = "attempting"
-            supabase_user = await verify_supabase_token(request)
-            if supabase_user:
-                result["token_verification"] = "success"
+            # 🚀 OPTIMIZATION: Use middleware results instead of re-verifying token
+            if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+                supabase_user = request.state.supabase_user
+                result["token_verification"] = "success_from_middleware"
                 result["token_user"] = {
                     "id": supabase_user.get("id"),
                     "email": supabase_user.get("email")
                 }
             else:
-                result["token_verification"] = "failed"
-                # Include the token preview for debugging
-                token = auth_header.split(" ")[1]
-                result["token_preview"] = token[:10] + "..." if len(token) > 10 else token
+                # If middleware didn't provide data, token verification failed
+                result["token_verification"] = "no_middleware_data"
         except Exception as e:
             result["token_verification"] = "error"
             result["token_error"] = str(e)

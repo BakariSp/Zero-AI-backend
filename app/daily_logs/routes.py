@@ -3,8 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 
-from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.db import get_db
 from app.models import User, DailyLog
 from app.daily_logs.schemas import (
     DailyLogCreate,
@@ -20,23 +19,16 @@ from app.daily_logs.crud import (
     delete_daily_log,
     get_user_streak
 )
+from app.users.routes import get_current_active_user_unified
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/daily-logs", response_model=List[DailyLogResponse])
 def read_user_logs(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all daily logs for the current user with optional date range"""
     logs = get_user_daily_logs(
@@ -50,7 +42,7 @@ def read_user_logs(
 @router.get("/daily-logs/today", response_model=Optional[DailyLogResponse])
 def read_today_log(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get today's log for the current user if it exists"""
     today = date.today()
@@ -61,7 +53,7 @@ def read_today_log(
 def read_log(
     log_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get a specific daily log by ID"""
     log = get_daily_log(db, log_id=log_id)
@@ -84,7 +76,7 @@ def read_log(
 def create_log(
     log: DailyLogCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Create a new daily log for the current user"""
     return create_daily_log(db=db, user_id=current_user.id, log_data=log)
@@ -94,7 +86,7 @@ def update_log(
     log_id: int,
     log: DailyLogUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Update an existing daily log"""
     # Check if log exists and belongs to user
@@ -121,7 +113,7 @@ def update_log(
 def delete_log(
     log_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Delete a daily log"""
     # Check if log exists and belongs to user
@@ -144,7 +136,7 @@ def delete_log(
 @router.get("/streak", response_model=dict)
 def get_current_streak(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get the current streak of consecutive days with logs"""
     streak = get_user_streak(db, user_id=current_user.id)
@@ -156,7 +148,7 @@ def daily_check_in(
     notes: Optional[str] = None,
     study_time_minutes: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Quick check-in for today"""
     today = date.today()

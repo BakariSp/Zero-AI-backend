@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime, timezone
 
-from app.db import SessionLocal
+from app.db import SessionLocal, get_db
 from app.users.routes import get_current_active_user_unified
 from app.models import User, CourseSection, UserSection, Card, Course, UserLearningPath, section_cards, user_section_cards, course_section_association, UserCourse
 from app.sections import crud
@@ -41,18 +41,14 @@ from app.progress.utils import update_course_progress_based_on_sections, update_
 #     updated_course_progress: float
 #     updated_learning_path_progress: float
 
-router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+router = APIRouter(
+    prefix="/sections",
+    tags=["Sections"],
+    responses={404: {"description": "Not found"}}
+)
 
 # 获取系统模板章节
-@router.get("/sections", response_model=List[SectionResponse])
+@router.get("/", response_model=List[SectionResponse])
 def get_sections(
     skip: int = 0, 
     limit: int = 100, 
@@ -63,7 +59,7 @@ def get_sections(
     return sections
 
 # 获取单个系统模板章节详情
-@router.get("/sections/{section_id}", response_model=SectionResponse)
+@router.get("/{section_id}", response_model=SectionResponse)
 def get_section(
     section_id: int, 
     db: Session = Depends(get_db)
@@ -114,7 +110,7 @@ def get_user_section(
         # Check if the template section itself exists to give a more precise error or context
         template_section_exists = db.query(CourseSection.id).filter(CourseSection.id == section_id).first()
         if not template_section_exists:
-            logging.warning(f"GET /users/me/sections/{section_id}: Template section itself not found.")
+            logging.warning(f"/users/me/sections/{section_id}: Template section itself not found.")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Template section with ID {section_id} not found."
@@ -123,7 +119,7 @@ def get_user_section(
             # Template exists, but user has no personalized version yet.
             # For a GET request for a *user* section, if the user-specific record doesn't exist,
             # it's appropriate to return 404. Creation should happen via POST/PUT or specific utility endpoints.
-            logging.warning(f"GET /users/me/sections/{section_id}: UserSection for template ID {section_id} not found for user {current_user.id}. Template exists.")
+            logging.warning(f"/users/me/sections/{section_id}: UserSection for template ID {section_id} not found for user {current_user.id}. Template exists.")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"User-specific section for template ID {section_id} not found. User has not interacted with this section yet or it hasn't been explicitly created."

@@ -2,28 +2,20 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
-from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.db import get_db
 from app.models import User, LearningPath, Course, learning_path_courses
 from app.learning_paths.crud import get_learning_path
 from app.courses.crud import get_course
+from app.users.routes import get_current_active_user_unified
 
 router = APIRouter()
-
-# Database dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/learning-path-courses", response_model=List[dict])
 def get_learning_path_courses(
     learning_path_id: Optional[int] = None,
     course_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all associations between learning paths and courses"""
     query = db.query(
@@ -54,7 +46,7 @@ def add_course_to_learning_path(
     course_id: int,
     order_index: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Add a course to a learning path (admin only)"""
     if not current_user.is_superuser:
@@ -116,7 +108,7 @@ def remove_course_from_learning_path(
     learning_path_id: int,
     course_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Remove a course from a learning path (admin only)"""
     if not current_user.is_superuser:

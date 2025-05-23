@@ -10,7 +10,7 @@ import os
 from sqlalchemy.orm import Session
 
 from app.users.crud import get_user_by_email, create_user, get_user_by_oauth, update_user
-from app.db import SessionLocal
+from app.db import get_db
 from app.models import User
 from passlib.context import CryptContext
 import logging
@@ -68,14 +68,6 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)

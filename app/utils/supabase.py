@@ -49,86 +49,94 @@ class SupabaseClient:
         token_preview = token[:10] + "..." if len(token) > 10 else "invalid_token"
         logger.info(f"Attempting to verify token {token_preview} with Supabase")
         
-        # Retry up to 3 times with exponential backoff
-        max_retries = 3
-        retry_delay = 0.5  # Start with 500ms delay
+        # First attempt - most tokens should succeed on first try
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "apikey": self.supabase_key,
+                    "Content-Type": "application/json"
+                }
+                logger.info(f"Sending request to {self.supabase_url}/auth/v1/user")
+                
+                response = await client.get(
+                    f"{self.supabase_url}/auth/v1/user",
+                    headers=headers
+                )
+                
+                logger.info(f"Received response: Status {response.status_code}")
+                
+                if response.status_code == 200:
+                    user_data = response.json()
+                    logger.info(f"Token verified successfully for user {user_data.get('id', 'unknown')}")
+                    if 'email' in user_data:
+                        email = user_data['email']
+                        logger.info(f"User email: {email}")
+                    return user_data
+                elif response.status_code == 401:
+                    logger.warning(f"Token is invalid or expired: {response.text}")
+                    return None
+                else:
+                    # For other errors, try a few more times
+                    logger.warning(f"Token verification failed with status {response.status_code}, will retry")
+                    
+        except (HTTPStatusError, TimeoutException, RequestError) as e:
+            logger.warning(f"Network error on first attempt: {str(e)}, will retry")
+        except Exception as e:
+            logger.error(f"Unexpected error verifying token: {str(e)}")
+            return None
+        
+        # Retry mechanism only for network errors or server errors (not auth errors)
+        max_retries = 2  # Reduced from 3 to 2 additional attempts
+        retry_delay = 0.5
         
         for attempt in range(1, max_retries + 1):
             try:
-                # Call the Supabase Auth API to get the user for this token
-                # This is a simplified example - in a real app, you might want to use
-                # a proper Supabase client library
-                logger.info(f"Verification attempt {attempt}/{max_retries}")
+                logger.info(f"Retry attempt {attempt}/{max_retries}")
                 async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
                     headers = {
                         "Authorization": f"Bearer {token}",
                         "apikey": self.supabase_key,
                         "Content-Type": "application/json"
                     }
-                    logger.info(f"Sending request to {self.supabase_url}/auth/v1/user")
                     
                     response = await client.get(
                         f"{self.supabase_url}/auth/v1/user",
                         headers=headers
                     )
                     
-                    logger.info(f"Received response: Status {response.status_code}")
+                    logger.info(f"Retry response: Status {response.status_code}")
                     
                     if response.status_code == 200:
                         user_data = response.json()
-                        logger.info(f"Token verified successfully for user {user_data.get('id', 'unknown')}")
+                        logger.info(f"Token verified successfully on retry for user {user_data.get('id', 'unknown')}")
                         if 'email' in user_data:
                             email = user_data['email']
                             logger.info(f"User email: {email}")
                         return user_data
                     elif response.status_code == 401:
-                        logger.warning(f"Token is invalid or expired: {response.text}")
-                        # No need to retry for auth errors
+                        logger.warning(f"Token is invalid or expired on retry: {response.text}")
                         return None
                     else:
-                        logger.warning(f"Token verification failed: {response.status_code} {response.text}")
-                        # For other errors, we'll retry
+                        logger.warning(f"Retry failed: {response.status_code} {response.text}")
                         if attempt < max_retries:
-                            wait_time = retry_delay * (2 ** (attempt - 1))  # Exponential backoff
-                            logger.info(f"Retrying in {wait_time} seconds...")
+                            wait_time = retry_delay * (2 ** attempt)
+                            logger.info(f"Waiting {wait_time}s before next retry...")
                             await asyncio.sleep(wait_time)
-                        else:
-                            logger.error(f"Max retries reached for token verification")
-                            return None
                             
-            except HTTPStatusError as e:
-                logger.error(f"HTTP error verifying token: {str(e)}")
+            except (HTTPStatusError, TimeoutException, RequestError) as e:
+                logger.error(f"Network error on retry {attempt}: {str(e)}")
                 if attempt < max_retries:
-                    wait_time = retry_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retrying in {wait_time} seconds...")
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.info(f"Waiting {wait_time}s before next retry...")
                     await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Max retries reached for token verification")
-                    return None
-            except TimeoutException:
-                logger.error(f"Timeout error verifying token")
-                if attempt < max_retries:
-                    wait_time = retry_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Max retries reached for token verification")
-                    return None
             except Exception as e:
-                logger.error(f"Error verifying token: {str(e)}")
-                
-                # Get stack trace for more detailed debugging
+                logger.error(f"Unexpected error on retry {attempt}: {str(e)}")
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
-                
-                if attempt < max_retries:
-                    wait_time = retry_delay * (2 ** (attempt - 1))
-                    logger.info(f"Retrying in {wait_time} seconds...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    logger.error(f"Max retries reached for token verification")
-                    return None
+                return None
         
+        logger.error(f"Token verification failed after all retries")
         return None
     
     async def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:

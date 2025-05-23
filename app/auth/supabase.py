@@ -131,6 +131,8 @@ async def get_supabase_user(
     Get the user from the Supabase token and ensure they exist in our database.
     If they don't exist, create them. If they do exist, update any necessary fields.
     
+    OPTIMIZED: This function now relies on middleware results instead of re-verifying tokens.
+    
     Args:
         request: The request object
         db: The database session
@@ -138,9 +140,17 @@ async def get_supabase_user(
     Returns:
         Optional[User]: The user if authentication is successful, None otherwise
     """
-    # Verify the Supabase token and get user data
-    supabase_data = await verify_supabase_token(request)
-    if not supabase_data:
+    # 🚀 OPTIMIZATION: Get Supabase data from middleware instead of re-verifying token
+    # This avoids duplicate token verification
+    
+    supabase_data = None
+    
+    # First check if we have user data from middleware
+    if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+        supabase_data = request.state.supabase_user
+        logger.info(f"Using Supabase user data from middleware: {supabase_data.get('email')}")
+    else:
+        logger.warning("No Supabase user data available from middleware")
         return None
     
     # Extract relevant user information
@@ -258,13 +268,16 @@ async def debug_supabase_auth(request: Request, db: Session = Depends(get_db)):
     """
     Debug endpoint for Supabase authentication.
     Provides information about the current authentication state.
+    OPTIMIZED: Uses middleware results instead of re-verifying tokens.
     """
     # Check for Authorization header
     auth_header = request.headers.get("Authorization")
     has_auth_header = auth_header is not None
     
-    # Try to get Supabase user data
-    supabase_data = await verify_supabase_token(request)
+    # 🚀 OPTIMIZATION: Get Supabase user data from middleware instead of re-verifying
+    supabase_data = None
+    if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
+        supabase_data = request.state.supabase_user
     
     # Check if the user exists in our database
     db_user = None
@@ -294,5 +307,9 @@ async def debug_supabase_auth(request: Request, db: Session = Depends(get_db)):
             "oauth_id": db_user.oauth_id if db_user else None
         },
         "supabase_config": supabase_config,
-        "request_headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")}
+        "request_headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")},
+        "middleware_info": {
+            "has_user_in_state": hasattr(request.state, "user") and request.state.user is not None,
+            "has_supabase_user_in_state": hasattr(request.state, "supabase_user") and request.state.supabase_user is not None
+        }
     } 

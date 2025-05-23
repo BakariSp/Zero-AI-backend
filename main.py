@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from app.auth import get_user_from_request, get_current_active_user
+from app.auth import get_current_active_user
 from app.auth.middleware import SupabaseAuthMiddleware
 from app.users.routes import router as users_router
 from app.auth.jwt import router as auth_router
@@ -187,86 +187,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 #     )
 #     log.info("Development environment: TrustedHostMiddleware configured for localhost")
 
-# Add middleware for user authentication - should come AFTER OPTIONS middleware
-@app.middleware("http")
-async def add_user_to_request(request: Request, call_next):
-    # Skip authentication for OPTIONS requests
-    if request.method == "OPTIONS":
-        logging.info(f"Authentication middleware skipping OPTIONS request to: {request.url.path}")
-        # For OPTIONS, just call next middleware without doing any auth
-        return await call_next(request)
-    
-    # Log the requested path to help with debugging
-    logging.info(f"Processing request for path: {request.url.path}, method: {request.method}")
-    
-    # Log Authorization header presence (not content for security)
-    auth_header = request.headers.get("Authorization")
-    logging.info(f"Authorization header present: {auth_header is not None}")
-    
-    # IMPORTANT: Make sure we're using the correct path
-    # Add original path for routing checks
-    if not hasattr(request.state, "original_path"):
-        request.state.original_path = request.url.path
-    
-    # Note: The SupabaseAuthMiddleware will have already populated request.state.user if using Supabase
-    # Only try the legacy authentication if no user was found by Supabase
-    if not hasattr(request.state, "user") or request.state.user is None:
-        try:
-            user = get_user_from_request(request)
-            
-            # Only set user if we found one through legacy methods
-            if user:
-                request.state.user = user
-                logging.info(f"User identified through legacy middleware: {user.get('userId', 'unknown')}")
-            else:
-                logging.info("No user identified through legacy middleware")
-        except Exception as e:
-            logging.warning(f"Error during legacy authentication: {str(e)}")
-            # Don't set user if there was an error
-            pass
-    else:
-        # Check what type of user we got from Supabase middleware
-        if isinstance(request.state.user, dict):
-            logging.info(f"Request already has legacy user from Supabase middleware: {request.state.user.get('userId', 'unknown')}")
-        else:
-            logging.info(f"Request already has DB user from Supabase middleware: {request.state.user.id}")
-    
-    # For debugging, check the state of authentication before proceeding
-    if hasattr(request.state, "user") and request.state.user is not None:
-        if isinstance(request.state.user, dict):
-            logging.info(f"Request will proceed with legacy user: {request.state.user.get('userId', 'unknown')}")
-        else:
-            logging.info(f"Request will proceed with DB user: {request.state.user.id}")
-    else:
-        # Check if we have supabase_user but not user
-        if hasattr(request.state, "supabase_user") and request.state.supabase_user is not None:
-            logging.info(f"Request has supabase_user data but no user object. This might indicate a database sync issue.")
-        
-        logging.info(f"Request will proceed without authenticated user")
-    
-    # Log authentication state
-    logging.info(f"Authentication check for path: {request.url.path}")
-    logging.info(f"Authorization header present: {auth_header is not None}")
-    
-    if auth_header and auth_header.startswith("Bearer "):
-        logging.info(f"Successfully validated token for {request.url.path}")
-    
-    response = await call_next(request)
-    
-    # If unauthorized response, log the path for debugging
-    if response.status_code == 401:
-        logging.warning(f"Unauthorized access to path: {request.url.path}")
-        
-        # Add debug header for tracing
-        response.headers["X-Debug-Path"] = request.url.path
-        if hasattr(request.state, "user") and request.state.user is not None:
-            user_id = getattr(request.state.user, "id", "unknown") 
-            response.headers["X-Debug-User-Present"] = "true"
-            response.headers["X-Debug-User-ID"] = str(user_id)
-        else:
-            response.headers["X-Debug-User-Present"] = "false"
-    
-    return response
+# REMOVED: Duplicate authentication middleware
+# The SupabaseAuthMiddleware already handles all authentication logic,
+# so we don't need the add_user_to_request middleware anymore
+logging.info("Authentication is handled by SupabaseAuthMiddleware only - no duplicate middleware")
 
 # Include routers - make sure the prefix is correct
 app.include_router(users_router, prefix="/api", tags=["users"])

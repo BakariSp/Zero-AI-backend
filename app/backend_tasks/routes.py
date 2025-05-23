@@ -5,7 +5,7 @@ import logging
 
 from app.db import get_db
 from app.models import User
-from app.auth import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from . import crud, schemas
 
 router = APIRouter(
@@ -18,7 +18,7 @@ router = APIRouter(
 def get_task_status(
     task_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the status of a specific background task.
@@ -38,7 +38,7 @@ def get_my_tasks(
     skip: int = 0,
     limit: int = 20,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get a list of system tasks initiated by the current user.
@@ -50,7 +50,7 @@ def get_my_tasks(
 def get_task_for_learning_path(
     learning_path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get the latest task associated with a specific learning path.

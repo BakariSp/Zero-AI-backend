@@ -5,7 +5,7 @@ from datetime import date
 
 from app.db import get_db
 from app.models import User
-from app.auth import get_current_active_user
+from app.users.routes import get_current_active_user_unified
 from . import crud, schemas
 
 router = APIRouter(
@@ -20,7 +20,7 @@ async def get_calendar_tasks(
     start: date,
     end: date,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get all tasks for a user within a specified date range.
@@ -51,7 +51,7 @@ async def update_calendar_task(
     task_id: int,
     task_update: schemas.DailyTaskUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Update a daily task's scheduled time or status.
@@ -91,7 +91,7 @@ async def update_calendar_task(
 async def delete_calendar_task(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Delete a daily task.
@@ -135,7 +135,7 @@ async def reschedule_section(
     section_id: int,
     reschedule_data: schemas.RescheduleSection,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Reschedule all tasks in a section to be evenly distributed across a new date range.
@@ -162,7 +162,7 @@ async def reschedule_section(
 async def shift_future_tasks(
     shift_request: schemas.ShiftTasksRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Shift all future tasks after a certain date by a specified number of days.
@@ -196,7 +196,7 @@ async def shift_future_tasks(
 async def create_calendar_task(
     task: schemas.DailyTaskCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Manually add a new daily task to the calendar.
@@ -246,7 +246,7 @@ def get_my_tasks(
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get a paginated list of tasks scheduled for the current user.
@@ -262,7 +262,7 @@ def get_my_tasks(
 def create_my_tasks(
     task: schemas.CurrentUserDailyTaskCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Create a task for the current user.
@@ -311,7 +311,7 @@ def create_my_tasks(
 def delete_my_task(
     task_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Delete a task belonging to the current user.
@@ -354,7 +354,7 @@ def update_my_task(
     task_id: int,
     task_update: schemas.DailyTaskUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Update a task belonging to the current user.

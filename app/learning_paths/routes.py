@@ -13,7 +13,6 @@ from sqlalchemy import func
 from app.progress.utils import initialize_user_progress_records
 
 from app.db import get_db
-from app.auth.jwt import get_current_active_user, get_current_user
 from app.models import User, LearningPath, UserLearningPath, CourseSection, UserCourse, UserSection, user_cards, Course, course_section_association, section_cards, Card, learning_path_courses, user_section_cards
 from app.learning_paths.schemas import (
     LearningPathCreate,

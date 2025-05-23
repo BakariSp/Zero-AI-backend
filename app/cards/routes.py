@@ -5,8 +5,7 @@ import logging
 from sqlalchemy.sql import text
 import asyncio
 
-from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.db import get_db
 from app.models import User, Card
 from app.cards.schemas import (
     CardCreate,
@@ -40,16 +39,9 @@ from app.setup import increment_user_resource_usage, get_user_remaining_resource
 from app.utils.url_validator import is_valid_url, get_valid_resources  # Import the validators
 from app.achievements.crud import check_completion_achievements
 from app.progress.utils import cascade_progress_update
+from app.users.routes import get_current_active_user_unified
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/cards", response_model=List[CardResponse])
 def read_cards(
@@ -58,7 +50,7 @@ def read_cards(
     keyword: Optional[str] = None,
     section_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all cards with optional filters"""
     cards = get_cards(
@@ -74,7 +66,7 @@ def read_cards(
 def read_card(
     card_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get a specific card by ID"""
     card = get_card(db, card_id=card_id)
@@ -89,7 +81,7 @@ def read_card(
 def create_new_card(
     card: CardCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Create a new card (admin only)"""
     if current_user is None:
@@ -111,7 +103,7 @@ def update_existing_card(
     card_id: int,
     card: CardUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Update an existing card (admin only)"""
     if current_user is None:
@@ -136,7 +128,7 @@ def update_existing_card(
 def delete_existing_card(
     card_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Delete a card (admin only)"""
     if current_user is None:
@@ -158,7 +150,7 @@ def delete_existing_card(
 def read_section_cards(
     section_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all cards for a specific course section"""
     cards = get_section_cards(db, section_id=section_id)
@@ -167,7 +159,7 @@ def read_section_cards(
 @router.get("/users/me/cards", response_model=List[UserCardResponse])
 def read_user_saved_cards(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all cards saved by the current user"""
     user_cards = get_user_saved_cards(db, user_id=current_user.id)
@@ -181,7 +173,7 @@ def save_card(
     depth_preference: Optional[str] = None,
     recommended_by: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Save a card for the current user"""
     return save_card_for_user(
@@ -198,7 +190,7 @@ def save_card(
 def get_saved_card(
     card_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get a saved card for the current user"""
     card = get_user_card_by_id(db, user_id=current_user.id, card_id=card_id)
@@ -209,7 +201,7 @@ async def update_saved_card(
     card_id: int,
     user_card: UserCardUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Update a saved card for the current user"""
     try:
@@ -283,7 +275,7 @@ async def update_saved_card(
 def remove_saved_card(
     card_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Remove a saved card for the current user"""
     remove_card_from_user(db=db, user_id=current_user.id, card_id=card_id)
@@ -294,7 +286,7 @@ def remove_card_from_learning_path(
     card_id: int,
     section_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Remove a card from a section in the user's learning path.
@@ -332,7 +324,7 @@ def remove_card_from_learning_path_alt_path(
     card_id: int,
     section_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Alternative path for removing a card from a learning path.
@@ -367,7 +359,7 @@ def remove_card_from_learning_path_alt_path(
 async def generate_ai_card(
     request: GenerateCardRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Generate a card using AI based on a keyword, potentially linking to a section."""
     try:
@@ -423,7 +415,7 @@ async def debug_validate_resources(
     context: Optional[str] = None,
     resources: Optional[List[Dict[str, str]]] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Debug endpoint to validate resources and get enhanced ones.

@@ -10,14 +10,6 @@ import logging
 
 router = APIRouter()
 
-# Database dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 @router.get("/me")
 def read_current_user(request: Request):
     user = request.state.user

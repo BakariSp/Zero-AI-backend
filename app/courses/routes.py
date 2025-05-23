@@ -3,8 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 import logging
 
-from app.db import SessionLocal
-from app.auth.jwt import get_current_active_user
+from app.db import get_db
 from app.models import User, Course, UserCourse, UserLearningPath, LearningPath
 from app.courses.schemas import (
     CourseCreate,
@@ -27,16 +26,9 @@ from app.courses.crud import (
 )
 from app.achievements.crud import check_completion_achievements
 from app.progress.utils import update_learning_path_progress_based_on_courses
+from app.users.routes import get_current_active_user_unified
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/courses", response_model=List[CourseResponse])
 def read_courses(
@@ -67,7 +59,7 @@ def read_course(
 def create_new_course(
     course: CourseCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Create a new course (admin only)"""
     if not current_user.is_superuser:
@@ -83,7 +75,7 @@ def update_existing_course(
     course_id: int,
     course: CourseUpdate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Update an existing course (admin only)"""
     if not current_user.is_superuser:
@@ -102,7 +94,7 @@ def update_existing_course(
 def delete_existing_course(
     course_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Delete a course (admin only)"""
     if not current_user.is_superuser:
@@ -116,7 +108,7 @@ def delete_existing_course(
 @router.get("/users/me/courses", response_model=List[UserCourseResponse])
 def read_user_courses(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all courses for the current user"""
     return get_user_courses(db=db, user_id=current_user.id)
@@ -125,7 +117,7 @@ def read_user_courses(
 def add_course_to_user(
     user_course: UserCourseCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Add an existing course to the current user"""
     # Check if course exists
@@ -148,7 +140,7 @@ def update_user_course(
     user_course_update: UserCourseUpdate,
     update_learning_paths: bool = True,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Update progress for a user's course"""
     user_course = get_user_course(db, user_id=current_user.id, course_id=course_id)
@@ -217,7 +209,7 @@ def read_learning_path_courses(
 def read_user_learning_path_courses(
     path_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """Get all courses for a user's learning path"""
     # Implementation depends on your database structure

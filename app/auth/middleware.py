@@ -1,5 +1,7 @@
 import json
 import logging
+import time
+from typing import Dict, Any, Optional
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy.orm import Session
@@ -10,6 +12,38 @@ from app.users.schemas import UserCreate
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Simple in-memory cache for token verification results (5-minute TTL)
+_token_cache: Dict[str, Dict[str, Any]] = {}
+_CACHE_TTL = 300  # 5 minutes in seconds
+
+def _get_cached_token_result(token: str) -> Optional[Dict[str, Any]]:
+    """Get cached token verification result if still valid"""
+    if token in _token_cache:
+        cached_data = _token_cache[token]
+        if time.time() - cached_data['timestamp'] < _CACHE_TTL:
+            logger.info(f"Using cached token verification result for token ending with ...{token[-10:]}")
+            return cached_data['user_data']
+        else:
+            # Remove expired cache entry
+            del _token_cache[token]
+    return None
+
+def _cache_token_result(token: str, user_data: Optional[Dict[str, Any]]):
+    """Cache token verification result"""
+    # Only cache successful verifications
+    if user_data:
+        _token_cache[token] = {
+            'user_data': user_data,
+            'timestamp': time.time()
+        }
+        # Limit cache size to prevent memory leaks
+        if len(_token_cache) > 1000:
+            # Remove oldest entries
+            oldest_keys = sorted(_token_cache.keys(), key=lambda k: _token_cache[k]['timestamp'])[:500]
+            for key in oldest_keys:
+                del _token_cache[key]
+            logger.info(f"Token cache cleanup: removed {len(oldest_keys)} old entries")
 
 class SupabaseAuthMiddleware(BaseHTTPMiddleware):
     """
@@ -48,8 +82,27 @@ class SupabaseAuthMiddleware(BaseHTTPMiddleware):
         request.state.user = None
         request.state.supabase_user = None
         
-        # Get Supabase user data from token
-        supabase_user = await verify_supabase_token(request)
+        # Get Supabase user data from token with caching
+        supabase_user = None
+        
+        # Extract token for caching check
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ")[1]
+            
+            # Try to get cached result first
+            cached_result = _get_cached_token_result(token)
+            if cached_result:
+                supabase_user = cached_result
+                logger.info(f"Using cached token verification for {request.url.path}")
+            else:
+                # Verify token and cache result
+                supabase_user = await verify_supabase_token(request)
+                if supabase_user:
+                    _cache_token_result(token, supabase_user)
+                    logger.info(f"Token verified and cached for {request.url.path}")
+                else:
+                    logger.info(f"Token verification failed for {request.url.path}")
+        
         if supabase_user:
             logger.info(f"Supabase authentication successful for {request.url.path}")
             logger.info(f"Supabase user ID: {supabase_user.get('id')}, email: {supabase_user.get('email')}")

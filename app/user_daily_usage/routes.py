@@ -3,22 +3,13 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 
-from app.db import SessionLocal
-from app.users.routes import get_current_active_user_unified
 from app.models import User
-
+from app.users.routes import get_current_active_user_unified
+from app.db import get_db
 from . import schemas, crud
 from .models import UserDailyUsage
 
 router = APIRouter()
-
-# Dependency to get the database session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 @router.get("/me", response_model=schemas.UserDailyUsageResponse)
 async def get_my_daily_usage(
