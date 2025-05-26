@@ -212,113 +212,98 @@ async def options_users_me(request: Request):
 
 @router.get("/users/me", response_model=schemas.UserResponse)
 async def read_users_me(
-    request: Request, 
-    current_user: User = Depends(get_current_active_user_unified)
+    request: Request,
+    current_user: User = Depends(get_current_active_user_unified),
+    db: Session = Depends(get_db)
 ):
-    # Enhanced debugging for this specific endpoint
-    logging.info("=== /users/me ENDPOINT DEBUG ===")
-    logging.info(f"Request method for /users/me: {request.method}")
-    logging.info(f"Authorization header present: {request.headers.get('Authorization') is not None}")
-    
-    # 🔍 DEBUG: 详细检查当前用户数据
-    if current_user:
-        logging.info(f"🔍 [/users/me] current_user found: ID={current_user.id}")
-        logging.info(f"🔍 [/users/me] current_user.email: '{current_user.email}'")
-        logging.info(f"🔍 [/users/me] current_user.username: '{current_user.username}'")
-        logging.info(f"🔍 [/users/me] current_user.full_name: '{current_user.full_name}'")
-        logging.info(f"🔍 [/users/me] current_user.is_guest: {getattr(current_user, 'is_guest', 'N/A')}")
-        logging.info(f"🔍 [/users/me] current_user.oauth_provider: '{current_user.oauth_provider}'")
-        logging.info(f"🔍 [/users/me] current_user.oauth_id: '{current_user.oauth_id}'")
-    else:
-        logging.error("🔍 [/users/me] current_user is None!")
+    """
+    Get current user information.
+    First tries to get user from database, falls back to Supabase data if needed.
+    For guest users, ensures proper data is returned.
+    """
+    try:
+        # 1. 首先尝试从数据库获取用户信息
+        if isinstance(current_user, User):
+            logging.info(f"🔍 [USER/ME] Found user in database: {current_user.id}")
+            return current_user
         
-    # Check for direct access to user from request.state for comparison
-    if hasattr(request.state, "user"):
-        user_state_obj = request.state.user
-        logging.info(f"🔍 [/users/me] request.state.user type: {type(user_state_obj)}")
-        if isinstance(user_state_obj, User):
-            logging.info(f"🔍 [/users/me] request.state.user ID: {user_state_obj.id}")
-            logging.info(f"🔍 [/users/me] request.state.user.email: '{user_state_obj.email}'")
-            logging.info(f"🔍 [/users/me] request.state.user.username: '{user_state_obj.username}'")
+        # 2. 如果current_user是字典（来自Supabase），尝试从数据库查找
+        if isinstance(current_user, dict):
+            user_id = current_user.get("id")
+            email = current_user.get("email")
+            is_anonymous = current_user.get("is_anonymous", False)
             
-            # 🔧 CRITICAL: Only use request.state.user if it has complete data
-            # Check if the data is more complete than current_user
-            if (current_user is None or 
-                (user_state_obj.email and not current_user.email) or
-                (user_state_obj.username and not current_user.username)):
-                logging.info(f"🔧 [/users/me] Using request.state.user as it has more complete data")
-                current_user = user_state_obj
-            elif current_user and current_user.email and current_user.username:
-                logging.info(f"🔧 [/users/me] current_user has complete data, using it instead of request.state.user")
-            else:
-                logging.warning(f"🔧 [/users/me] Both sources have incomplete data, proceeding with current_user")
-    
-    # Final validation: if we have a user, make sure they have basic required data
-    if current_user:
-        logging.info(f"🔍 [/users/me] Final user validation before serialization:")
-        logging.info(f"🔍 [/users/me] - ID: {current_user.id}")
-        logging.info(f"🔍 [/users/me] - Email: '{current_user.email}' (empty: {not current_user.email})")
-        logging.info(f"🔍 [/users/me] - Username: '{current_user.username}' (None: {current_user.username is None})")
-        logging.info(f"🔍 [/users/me] - Full name: '{current_user.full_name}' (None: {current_user.full_name is None})")
-        
-        # If user data is incomplete, try to refresh from database
-        if not current_user.email or not current_user.username:
-            logging.warning(f"🔧 [/users/me] User data is incomplete, attempting to refresh from database")
-            try:
-                from app.db import SessionLocal
-                db = SessionLocal()
+            logging.info(f"🔍 [USER/ME] Attempting to find user in database with:")
+            logging.info(f"🔍 [USER/ME] - Supabase ID: {user_id}")
+            logging.info(f"🔍 [USER/ME] - Email: {email}")
+            logging.info(f"🔍 [USER/ME] - Is Anonymous: {is_anonymous}")
+            
+            # 首先尝试通过oauth_id查找
+            if user_id:
                 try:
-                    # Try to get user by oauth_id first (more reliable for Supabase users)
-                    if current_user.oauth_id:
-                        from app.users.crud import get_user_by_oauth
-                        db_user = get_user_by_oauth(db, current_user.oauth_provider, current_user.oauth_id)
-                        if db_user:
-                            logging.info(f"🔧 [/users/me] Found user in DB by oauth_id: {db_user.id}")
-                            current_user = db_user
-                    # Fallback to lookup by ID
-                    elif hasattr(current_user, 'id') and current_user.id:
-                        from app.users.crud import get_user
-                        db_user = get_user(db, current_user.id)
-                        if db_user:
-                            logging.info(f"🔧 [/users/me] Found user in DB by ID: {db_user.id}")
-                            current_user = db_user
-                finally:
-                    db.close()
-            except Exception as e:
-                logging.error(f"🔧 [/users/me] Error refreshing user from database: {str(e)}")
+                    from app.users.crud import get_user_by_oauth
+                    db_user = get_user_by_oauth(db, "supabase", user_id)
+                    if db_user:
+                        logging.info(f"🔍 [USER/ME] Found user by oauth_id: {db_user.id}")
+                        return db_user
+                except Exception as e:
+                    logging.warning(f"🔍 [USER/ME] Error looking up user by oauth_id: {str(e)}")
+            
+            # 如果通过oauth_id没找到，尝试通过邮箱查找
+            if email:
+                try:
+                    db_user = get_user_by_email(db, email=email)
+                    if db_user:
+                        logging.info(f"🔍 [USER/ME] Found user by email: {db_user.id}")
+                        # 如果找到用户但没有oauth_id，更新它
+                        if not db_user.oauth_id and user_id:
+                            db_user.oauth_provider = "supabase"
+                            db_user.oauth_id = user_id
+                            db.commit()
+                            logging.info(f"🔍 [USER/ME] Updated user with Supabase oauth_id: {db_user.id}")
+                        return db_user
+                except Exception as e:
+                    logging.warning(f"🔍 [USER/ME] Error looking up user by email: {str(e)}")
+            
+            # 3. 如果是游客用户且数据库中没有找到，创建新用户
+            if is_anonymous or (not email and user_id):
+                logging.info(f"🔍 [USER/ME] Creating new guest user for Supabase ID: {user_id}")
+                
+                # 生成游客用户名和邮箱
+                safe_user_id = user_id.replace("-", "").replace("_", "")
+                username = f"guest_{safe_user_id}"
+                email = f"guest_{safe_user_id}@example.com"
+                
+                # 创建用户数据
+                user_data = UserCreate(
+                    email=email,
+                    username=username,
+                    password="",  # 游客用户不需要密码
+                    full_name="Guest User",
+                    is_active=True,
+                    subscription_type="free"
+                )
+                
+                # 创建用户
+                new_user = create_user(
+                    db=db,
+                    user=user_data,
+                    oauth_provider="supabase",
+                    oauth_id=user_id,
+                    is_guest=True
+                )
+                
+                logging.info(f"🔍 [USER/ME] Created new guest user: {new_user.id}")
+                return new_user
         
-        # Serialize and return the user data
-        try:
-            user_data = jsonable_encoder(current_user)
-            logging.info(f"🔍 [/users/me] Successfully serialized user data:")
-            logging.info(f"🔍 [/users/me] - Serialized email: '{user_data.get('email', 'MISSING')}'")
-            logging.info(f"🔍 [/users/me] - Serialized username: '{user_data.get('username', 'MISSING')}'")
-            logging.info(f"🔍 [/users/me] - Serialized full_name: '{user_data.get('full_name', 'MISSING')}'")
-            
-            response = JSONResponse(content=user_data)
-            
-            # Add CORS headers directly
-            origin = request.headers.get("Origin", "http://localhost:3000")
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-            
-            return response
-        except Exception as e:
-            logging.error(f"🔍 [/users/me] Error serializing user data: {str(e)}")
-            import traceback
-            logging.error(f"🔍 [/users/me] Serialization traceback: {traceback.format_exc()}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to serialize user data: {str(e)}"
-            )
-    
-    # If we reach here, authentication has failed
-    logging.error("🔍 [/users/me] All authentication methods failed")
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Authentication failed",
-        headers={"WWW-Authenticate": "Bearer"}
-    )
+        # 4. 如果数据库查找失败，使用Supabase数据
+        logging.info(f"🔍 [USER/ME] Falling back to Supabase user data")
+        return current_user
+        
+    except Exception as e:
+        logging.error(f"🔍 [USER/ME] Error in read_users_me: {str(e)}")
+        # 如果发生错误，返回Supabase数据作为后备
+        return current_user
 
 @router.put("/users/me", response_model=schemas.UserResponse)
 async def update_user_me(
