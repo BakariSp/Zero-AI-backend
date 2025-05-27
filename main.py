@@ -67,33 +67,71 @@ origins = [
 # Remove empty origins
 origins = [origin for origin in origins if origin]
 
-# OPTIONS preflight request handler middleware - this must be added FIRST
-@app.middleware("http")
-async def options_middleware(request: Request, call_next):
-    if request.method == "OPTIONS":
-        # For CORS preflight requests, return a minimal 200 response
-        log.info(f"OPTIONS middleware handling request to: {request.url.path}")
+# Configure CORS - use a simpler configuration that allows all headers and methods
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Use the specific origins defined above
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
+    expose_headers=["Content-Type", "Authorization"],
+    max_age=86400,  # Cache preflight response for 24 hours
+)
+
+# Add a middleware to ensure CORS headers are set on all responses
+class EnsureCORSHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        # Continue with the regular request processing
+        response = await call_next(request)
         
-        # Create a minimal response
-        response = Response(status_code=200)
-        
-        # Set basic CORS headers
+        # Get origin from request
         origin = request.headers.get("Origin")
+        
+        # Only set CORS headers if origin is present
+        if origin:
+            # Check if the origin is in our allowed origins
+            if origin in origins:
+                response.headers["Access-Control-Allow-Origin"] = origin
+            else:
+                # Fallback to the frontend URL if origin not in allowed list
+                response.headers["Access-Control-Allow-Origin"] = frontend_url
+                
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With, Access-Control-Request-Method, Access-Control-Request-Headers, X-CSRF-Token, X-MS-CLIENT-PRINCIPAL, X-Supabase-User"
+            response.headers["Access-Control-Max-Age"] = "86400"  # 24 hours
+        
+        return response
+
+app.add_middleware(EnsureCORSHeadersMiddleware)
+
+# Add a global OPTIONS handler
+@app.options("/{path:path}")
+async def options_handler(path: str, request: Request):
+    """
+    Global OPTIONS handler for CORS preflight requests.
+    This is a fallback in case an individual route doesn't have its own OPTIONS handler.
+    """
+    response = Response(status_code=200)
+    
+    # Get origin from request headers
+    origin = request.headers.get("Origin")
+    
+    # Only set CORS headers if origin is present
+    if origin:
         # Check if the origin is in our allowed origins
         if origin in origins:
             response.headers["Access-Control-Allow-Origin"] = origin
         else:
-            # Fallback to the frontend URL
+            # Fallback to the frontend URL if origin not in allowed list
             response.headers["Access-Control-Allow-Origin"] = frontend_url
             
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With, Access-Control-Request-Method, Access-Control-Request-Headers, X-CSRF-Token, X-MS-CLIENT-PRINCIPAL, X-Supabase-User"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Max-Age"] = "86400"  # 24 hours
-        
-        return response
-        
-    return await call_next(request)
+    
+    return response
 
 # Add SessionMiddleware - this is required for OAuth
 app.add_middleware(
@@ -113,45 +151,8 @@ log.info(f"- Same site: lax")
 log.info(f"- HTTPS only: {os.getenv('ENVIRONMENT', 'development').lower() == 'production'}")
 log.info(f"- Secret key available: {bool(os.getenv('SESSION_SECRET_KEY'))}")
 
-# Configure CORS - use a simpler configuration that allows all headers and methods
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,  # Use the specific origins defined above
-    allow_credentials=True,
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
-    expose_headers=["Content-Type", "Authorization"],
-    max_age=86400,  # Cache preflight response for 24 hours
-)
-
 # Add Supabase authentication middleware
 app.add_middleware(SupabaseAuthMiddleware)
-
-# Add a middleware to ensure CORS headers are set on all responses
-class EnsureCORSHeadersMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Continue with the regular request processing
-        response = await call_next(request)
-        
-        # Check if the response already has CORS headers
-        if "Access-Control-Allow-Origin" not in response.headers:
-            # Get origin from request
-            origin = request.headers.get("Origin")
-            
-            # Only set CORS headers if origin is present
-            if origin:
-                # Check if the origin is in our allowed origins
-                if origin in origins:
-                    response.headers["Access-Control-Allow-Origin"] = origin
-                else:
-                    # Fallback to the frontend URL if origin not in allowed list
-                    response.headers["Access-Control-Allow-Origin"] = frontend_url
-                    
-                response.headers["Access-Control-Allow-Credentials"] = "true"
-        
-        return response
-
-app.add_middleware(EnsureCORSHeadersMiddleware)
 
 # Security headers middleware for production
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -197,20 +198,20 @@ app.include_router(users_router, prefix="/api", tags=["users"])
 app.include_router(auth_router, prefix="/api", tags=["auth"])
 app.include_router(guest_router, prefix="/api", tags=["guest"])
 app.include_router(supabase_router, prefix="/api/auth/supabase", tags=["supabase"])
-app.include_router(cards_router, prefix="/api", tags=["cards"])
 app.include_router(learning_paths_router, prefix="/api", tags=["learning_paths"])
-app.include_router(daily_logs_router, prefix="/api", tags=["daily_logs"])
-app.include_router(achievements_router, prefix="/api", tags=["achievements"])
-app.include_router(courses_router, prefix="/api", tags=["courses"])
-app.include_router(sections_router, prefix="/api", tags=["sections"])
 app.include_router(learning_path_courses_router, prefix="/api", tags=["learning_path_courses"])
 app.include_router(recommendation_router, prefix="/api", tags=["recommendation"])
-app.include_router(oauth_router, prefix="/api/oauth", tags=["oauth"])
-app.include_router(backend_tasks_router, prefix="/api/backend-tasks", tags=["backend_tasks"])
-app.include_router(user_tasks_router, prefix="/api/user-tasks", tags=["user_tasks"])
-app.include_router(user_daily_usage_router, prefix="/api/daily-usage", tags=["user_daily_usage"])
-app.include_router(planner_router, prefix="/api/planner", tags=["planner"])
-app.include_router(learning_assistant_router, prefix="/api/learning-assistant", tags=["learning_assistant"])
+app.include_router(cards_router, prefix="/api", tags=["cards"])
+app.include_router(courses_router, prefix="/api", tags=["courses"])
+app.include_router(sections_router, prefix="/api", tags=["sections"])
+app.include_router(daily_logs_router, prefix="/api", tags=["daily_logs"])
+app.include_router(achievements_router, prefix="/api", tags=["achievements"])
+app.include_router(oauth_router, prefix="/api/auth/oauth", tags=["oauth"])
+app.include_router(backend_tasks_router, prefix="/api", tags=["backend_tasks"])
+app.include_router(user_tasks_router, prefix="/api", tags=["user_tasks"])
+app.include_router(user_daily_usage_router, prefix="/api", tags=["user_daily_usage"])
+app.include_router(planner_router, prefix="/api", tags=["planner"])
+app.include_router(learning_assistant_router, prefix="/api", tags=["learning_assistant"])
 app.include_router(app_routes, prefix="/api", tags=["app"])
 
 # Startup event - initialize database
@@ -233,34 +234,6 @@ class CustomJSONEncoder(json.JSONEncoder):
         if isinstance(obj, datetime):
             return obj.isoformat()
         return super().default(obj)
-
-# Add a global OPTIONS handler
-@app.options("/{path:path}")
-async def options_handler(path: str, request: Request):
-    """
-    Global OPTIONS handler for CORS preflight requests.
-    This is a fallback in case an individual route doesn't have its own OPTIONS handler.
-    """
-    response = Response(status_code=200)
-    
-    # Get origin from request headers
-    origin = request.headers.get("Origin")
-    
-    # Only set CORS headers if origin is present
-    if origin:
-        # Check if the origin is in our allowed origins
-        if origin in origins:
-            response.headers["Access-Control-Allow-Origin"] = origin
-        else:
-            # Fallback to the frontend URL if origin not in allowed list
-            response.headers["Access-Control-Allow-Origin"] = frontend_url
-            
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With, Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Max-Age"] = "86400"  # 24 hours
-    
-    return response
 
 @app.get("/")
 def read_root():

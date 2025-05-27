@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 from fastapi import BackgroundTasks
@@ -11,7 +11,8 @@ import base64
 import json
 import hashlib
 
-from app.db import get_db
+from app.db import SessionLocal
+from app.users.routes import get_current_active_user_unified
 from app.models import (
     LearningPath, Course, Card, User, UserLearningPath, 
     learning_path_courses,  # Add this import
@@ -30,12 +31,19 @@ from app.recommendation.crud import (
     get_recommended_cards, get_interest_learning_paths, get_random_learning_paths
 )
 from app.services.learning_path_planner import LearningPathPlannerService
-from app.users.routes import get_current_active_user_unified
 from app.learning_paths.crud import assign_learning_path_to_user
 from app.services.background_tasks import schedule_learning_path_generation, schedule_full_learning_path_generation, schedule_structured_learning_path_generation, get_task_status
 from app.setup import increment_user_resource_usage, get_user_remaining_resources
 
 router = APIRouter()
+
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 @router.get("/recommendations", response_model=RecommendationResponse)
 def get_recommendations(
@@ -58,25 +66,46 @@ def get_recommendations(
         cards=[CardResponse.from_orm(card) for card in cards]
     )
 
-@router.get("/learning-paths/{path_id}/full", response_model=LearningPathResponse)
+@router.get("/users/me/learning-paths/{path_id}/full", response_model=LearningPathResponse)
 def get_learning_path_full(
     path_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user_unified)
 ):
     """
     Get a complete learning path with all its courses, sections, and cards
     """
-    learning_path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
+    # First check if the user has access to this learning path
+    user_path = db.query(UserLearningPath).filter(
+        UserLearningPath.user_id == current_user.id,
+        UserLearningPath.learning_path_id == path_id
+    ).first()
+    
+    if not user_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Learning path not found for this user"
+        )
+    
+    # Get the learning path with all its related data
+    learning_path = (
+        db.query(LearningPath)
+        .options(
+            selectinload(LearningPath.courses)
+            .selectinload(Course.sections)
+            .selectinload(CourseSection.cards)
+        )
+        .filter(LearningPath.id == path_id)
+        .first()
+    )
     
     if not learning_path:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Learning path with ID {path_id} not found"
+            detail="Learning path not found"
         )
     
-    # The response model should handle the relationships automatically
-    # if they're properly defined in your Pydantic models
-    return LearningPathResponse.from_orm(learning_path)
+    return learning_path
 
 @router.post("/recommendations/personalized", response_model=RecommendationResponse)
 async def get_personalized_recommendations(
